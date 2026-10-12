@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Branch</title>
+    <script type="module" src="/src/main.js" defer></script>
+  </head>
+
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <button id="go-home" title="Aller au dossier personnel">🏠</button>
+          <button id="go-up" title="Dossier parent">⬆</button>
+          <span id="current-path" class="current-path"></span>
+        </div>
+
+        <div id="git-bar" class="git-bar" hidden>
+          <span id="git-branch" class="git-branch"></span>
+          <span id="git-ahead-behind" class="git-ahead-behind"></span>
+        </div>
+
+        <div class="filter-row">
+          <input id="filter-input" type="text" placeholder="Filtrer les fichiers..." />
+        </div>
+
+        <div id="file-tree" class="file-tree panel"></div>
+
+        <div id="claude-panel" class="claude-panel panel" hidden>
+          <div class="claude-panel-title">Session Claude Code</div>
+          <div id="claude-branch" class="claude-branch"></div>
+          <div class="claude-actions">
+            <button data-slash="/clear">/clear</button>
+            <button data-slash="/compact">/compact</button>
+            <button data-slash="/doctor">/doctor</button>
+            <button data-slash="/help">/help</button>
+            <button id="claude-escape">Échap (interrompre)</button>
+          </div>
+          <div class="claude-panel-subtitle">Historique de cette session</div>
+          <div id="claude-history" class="claude-history"></div>
+        </div>
+
+        <div id="server-panel" class="server-panel panel" hidden>
+          <div class="claude-panel-title">Serveur de dev actif</div>
+          <div id="server-url-row" class="server-url-row">
+            <span id="server-url" class="server-url">URL non détectée</span>
+            <button id="server-open">Ouvrir</button>
+          </div>
+          <button id="server-stop" class="server-stop">Arrêter (Ctrl+C)</button>
+        </div>
+
+        <div id="ssh-panel" class="ssh-panel panel" hidden>
+          <div class="claude-panel-title">Connexion SSH</div>
+          <div id="ssh-host" class="ssh-host"></div>
+          <button id="ssh-close">Fermer la connexion</button>
+        </div>
+      </aside>
+      <main class="terminal-pane">
+        <div id="terminal"></div>
+      </main>
+    </div>
+
+    <div id="context-menu" class="context-menu" hidden>
+      <div class="context-menu-item" data-action="open-editor">Ouvrir dans l'éditeur</div>
+      <div class="context-menu-item" data-action="copy-path">Copier le chemin</div>
+      <div class="context-menu-item context-menu-danger" data-action="delete">Supprimer</div>
+    </div>
+  </body>
+</html>

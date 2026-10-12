@@ -1,0 +1,335 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #1e1e1e;
+  color: #ddd;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+.sidebar {
+  width: 260px;
+  min-width: 180px;
+  max-width: 420px;
+  background: #252526;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.sidebar-header button {
+  background: #333;
+  border: none;
+  color: #ddd;
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.sidebar-header button:hover {
+  background: #3e3e3e;
+}
+
+.current-path {
+  font-size: 11px;
+  color: #999;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.file-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.tree-node {
+  display: flex;
+  align-items: center;
+  padding: 3px 8px;
+  white-space: nowrap;
+  cursor: pointer;
+  border-radius: 3px;
+  user-select: none;
+}
+
+.tree-node:hover {
+  background: #2a2d2e;
+}
+
+.tree-node.active {
+  background: #37373d;
+}
+
+.tree-node .chevron {
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+  font-size: 10px;
+  color: #888;
+  cursor: pointer;
+}
+
+.tree-node .icon {
+  width: 18px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.tree-node .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-children {
+  margin-left: 14px;
+}
+
+.badge {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  border-radius: 3px;
+  color: #1e1e1e;
+}
+
+.badge-modified {
+  background: #e2c08d;
+}
+
+.badge-untracked {
+  background: #73c991;
+}
+
+.badge-added {
+  background: #73c991;
+}
+
+.badge-deleted {
+  background: #f14c4c;
+}
+
+.git-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid #333;
+  font-size: 12px;
+  color: #ccc;
+  flex-shrink: 0;
+}
+
+.git-ahead-behind {
+  color: #999;
+  font-size: 11px;
+}
+
+.filter-row {
+  padding: 6px 8px;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.filter-row input {
+  width: 100%;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  color: #ddd;
+  border-radius: 4px;
+  padding: 5px 7px;
+  font-size: 12px;
+}
+
+.filter-row input:focus {
+  outline: none;
+  border-color: #5a5a5a;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  background: #2d2d2d;
+  border: 1px solid #454545;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  min-width: 170px;
+}
+
+.context-menu-item {
+  padding: 6px 10px;
+  font-size: 13px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.context-menu-item:hover {
+  background: #3e3e3e;
+}
+
+.context-menu-danger {
+  color: #f14c4c;
+}
+
+.panel {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.claude-panel {
+  padding: 12px 10px;
+}
+
+.claude-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #a68cff;
+  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.claude-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.claude-actions button {
+  background: #333;
+  border: none;
+  color: #ddd;
+  border-radius: 4px;
+  padding: 6px 8px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: Menlo, Monaco, monospace;
+}
+
+.claude-actions button:hover {
+  background: #3e3e3e;
+}
+
+.claude-branch {
+  font-size: 12px;
+  color: #999;
+  margin-bottom: 10px;
+}
+
+.claude-panel-subtitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 16px 0 8px;
+}
+
+.claude-history {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #aaa;
+  font-family: Menlo, Monaco, monospace;
+}
+
+.claude-history-entry {
+  padding: 3px 6px;
+  background: #2a2a2a;
+  border-radius: 3px;
+}
+
+.server-panel,
+.ssh-panel {
+  padding: 12px 10px;
+}
+
+.server-url-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.server-url {
+  flex: 1;
+  font-size: 12px;
+  color: #ccc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-url-row button,
+.server-stop,
+.ssh-panel button {
+  background: #333;
+  border: none;
+  color: #ddd;
+  border-radius: 4px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.server-url-row button:hover,
+.server-stop:hover,
+.ssh-panel button:hover {
+  background: #3e3e3e;
+}
+
+.server-stop {
+  width: 100%;
+}
+
+.ssh-host {
+  font-size: 13px;
+  color: #ccc;
+  margin-bottom: 10px;
+  font-family: Menlo, Monaco, monospace;
+}
+
+.terminal-pane {
+  flex: 1;
+  background: #1e1e1e;
+  padding: 8px;
+  overflow: hidden;
+}
+
+#terminal {
+  height: 100%;
+  width: 100%;
+}
