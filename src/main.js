@@ -9,7 +9,7 @@ import "@xterm/xterm/css/xterm.css";
 const term = new Terminal({
   cursorBlink: true,
   fontSize: 13,
-  fontFamily: "Menlo, Monaco, 'Courier New', monospace",
+  fontFamily: "Menlo, Monaco, Consolas, 'Cascadia Mono', 'Courier New', monospace",
   theme: {
     background: "#1e1e1e",
     foreground: "#ddd",
@@ -416,7 +416,7 @@ async function pollLiveState() {
 document.querySelectorAll("#claude-panel [data-slash]").forEach((button) => {
   button.addEventListener("click", () => {
     const slash = button.dataset.slash;
-    invoke("write_to_pty", { data: `${slash}\n` });
+    invoke("write_to_pty", { data: `${slash}\r` });
     const entry = document.createElement("div");
     entry.className = "claude-history-entry";
     entry.textContent = slash;

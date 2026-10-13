@@ -235,7 +235,7 @@ body {
   text-align: left;
   cursor: pointer;
   font-size: 13px;
-  font-family: Menlo, Monaco, monospace;
+  font-family: Menlo, Monaco, Consolas, "Cascadia Mono", monospace;
 }
 
 .claude-actions button:hover {
@@ -263,7 +263,7 @@ body {
   gap: 4px;
   font-size: 12px;
   color: #aaa;
-  font-family: Menlo, Monaco, monospace;
+  font-family: Menlo, Monaco, Consolas, "Cascadia Mono", monospace;
 }
 
 .claude-history-entry {
@@ -319,7 +319,7 @@ body {
   font-size: 13px;
   color: #ccc;
   margin-bottom: 10px;
-  font-family: Menlo, Monaco, monospace;
+  font-family: Menlo, Monaco, Consolas, "Cascadia Mono", monospace;
 }
 
 .terminal-pane {
