@@ -16,9 +16,12 @@ npm run tauri dev      # lance Vite (port 1420, strictPort) + l'appli Tauri
 npm run tauri build    # installeurs dans src-tauri/target/release/bundle/
 npm run build          # front seul (Vite → dist/)
 cargo check --manifest-path src-tauri/Cargo.toml   # vérif rapide du Rust
+cargo test --manifest-path src-tauri/Cargo.toml    # tests unitaires (parseurs, décodage)
 ```
 
-Il n'y a ni tests, ni linter, ni CI. On vérifie en lançant l'appli avec `npm run tauri dev`.
+Pas de linter ni de CI. Les tests unitaires couvrent les fonctions pures de `lib.rs`. Pour le reste, on lance l'appli avec `npm run tauri dev`.
+
+Pour `cargo check --target x86_64-pc-windows-msvc` depuis macOS, le build script exige `llvm-rc` (`brew install llvm`). Un faux `llvm-rc` qui écrit un fichier vide suffit pour un simple check.
 
 ## Architecture
 
