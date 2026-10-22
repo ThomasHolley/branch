@@ -95,15 +95,18 @@ body {
   cursor: pointer;
 }
 
-.tree-node .icon {
-  width: 18px;
-  flex-shrink: 0;
-  text-align: center;
-}
-
 .tree-node .label {
   overflow: hidden;
   text-overflow: ellipsis;
+  padding-left: 2px;
+}
+
+.tree-node.is-dir .label {
+  color: #e8e8e8;
+}
+
+.tree-node.is-file .label {
+  color: #bbb;
 }
 
 .tree-children {

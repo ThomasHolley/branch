@@ -17,3 +17,18 @@ autoload -Uz add-zsh-hook
 add-zsh-hook preexec _branch_preexec
 # First, so that $? is still the exit code of the command.
 precmd_functions=(_branch_precmd $precmd_functions)
+
+# Silent navigation from the sidebar: the app writes the folder to $BRANCH_CD_FILE and
+# sends Ctrl+Alt+Shift+F12. The cd happens without a command line being echoed, and
+# whatever was being typed stays in the buffer.
+_branch_cd() {
+  local dir
+  dir="$(<"$BRANCH_CD_FILE")" 2>/dev/null || return
+  builtin cd -- "$dir" 2>/dev/null || return
+  _branch_precmd
+  zle reset-prompt
+}
+zle -N _branch_cd
+bindkey -M emacs '\e[24;8~' _branch_cd
+bindkey -M viins '\e[24;8~' _branch_cd
+bindkey -M vicmd '\e[24;8~' _branch_cd
