@@ -28,8 +28,9 @@ Pour `cargo check --target x86_64-pc-windows-msvc` depuis macOS, le build script
 
 Le projet tient dans très peu de fichiers :
 
-- [src-tauri/src/lib.rs](src-tauri/src/lib.rs) contient tout le backend : l'état `PtyState` (master, writer, PID du shell) et toutes les commandes `#[tauri::command]`, enregistrées dans `generate_handler!` en bas de `run()`.
-- [src/main.js](src/main.js) contient tout le frontend en JS vanilla, sans framework : le terminal xterm, l'arbre de fichiers, le statut git, le menu contextuel et les panneaux de la sidebar.
+- [src-tauri/src/lib.rs](src-tauri/src/lib.rs) contient tout le backend : l'état `Sessions` (un PTY par onglet, indexé par id ; toutes les commandes liées au terminal prennent cet `id`, et les événements `pty-data`/`pty-exit` portent `{ id, … }`) et toutes les commandes `#[tauri::command]`, enregistrées dans `generate_handler!` en bas de `run()`.
+- [src/main.js](src/main.js) contient le frontend en JS vanilla, sans framework : les onglets, l'arbre de fichiers, le statut git, le menu contextuel et les panneaux de la sidebar. La sidebar affiche toujours la session de l'onglet actif (`active`).
+- [src/session.js](src/session.js) définit la classe `Session` : un onglet, avec son xterm, son shell côté backend (identifié par un `id`) et l'état rapporté par la shell integration (`atPrompt`, `cwd`, historique, contexte).
 - [src/context.js](src/context.js) contient `classifyForeground()` : à partir de `foreground_state` (nom, ligne de commande, ports en écoute), il choisit le panneau de la sidebar (claude, ssh, serveur, éditeur, pager, REPL, commande en cours, shell). C'est un module pur, sans DOM : on y ajoute les nouveaux contextes et leurs tests.
 - [index.html](index.html) définit la structure de la sidebar : les panneaux `file-tree`, `claude-panel`, `server-panel` et `ssh-panel`, plus le menu contextuel.
 - [src/styles.css](src/styles.css) : thème sombre.
@@ -37,7 +38,7 @@ Le projet tient dans très peu de fichiers :
 
 Flux principaux :
 
-- **PTY** : `start_shell` démarre le shell dans le dossier personnel. Un thread lit la sortie et l'émet dans l'événement `pty-data`. Le front renvoie les frappes via `write_to_pty` et appelle `resize_pty` quand la fenêtre change de taille.
+- **PTY** : `start_shell(cwd)` démarre un shell (nouvel onglet = dossier de l'onglet actif) et renvoie son id. `close_all_shells` est appelé au chargement de la page, pour ne pas laisser traîner les shells d'avant un rechargement. Un thread lit la sortie et l'émet dans l'événement `pty-data`. Le front renvoie les frappes via `write_to_pty` et appelle `resize_pty` quand la fenêtre change de taille.
 - **Shell integration** : le shell signale son état avec une séquence OSC privée, interceptée par xterm (`term.parser.registerOscHandler(6973, …)`). À chaque prompt, il envoie `ESC ] 6973 ; prompt ; <code> ; <cwd> BEL`. Au lancement d'une commande, il envoie `ESC ] 6973 ; cmd ; <texte> BEL`. Les scripts sont dans [src-tauri/shell/](src-tauri/shell/) : zsh via `ZDOTDIR` (le `.zshenv`/`.zshrc` de l'utilisateur reste chargé), bash via `--rcfile`. PowerShell utilise `PS_INIT` dans `lib.rs`. Ces séquences alimentent l'état `atPrompt`, le dossier courant et l'historique des commandes. L'OSC 7 standard, envoyé par certains shells distants, s'affiche dans le panneau SSH.
 - **Polling** : `pollLiveState()` tourne toutes les secondes, mais ne fait rien quand le shell est au prompt. Pendant une commande, il appelle `foreground_state` puis `classifyForeground()`. Un serveur de dev est reconnu à ses **ports TCP en écoute** (job au premier plan via `pgrep -g` + `lsof`, ou descendants du shell + `netstat` sous Windows), pas au nom du processus. Pour les shells sans intégration (fish…), il appelle aussi `shell_cwd` (`lsof`, ou fichier temporaire sous Windows).
 - **Navigation permanente** : l'arbre reste toujours visible. Le panneau du contexte (Claude, serveur, SSH, éditeur…) s'affiche au-dessus, sous forme de carte. Le comportement de l'arbre dépend de `canDriveShell()` :

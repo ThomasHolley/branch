@@ -2,85 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { classifyForeground, formatElapsed, gitOperationLabel } from "./context.js";
+import { Session } from "./session.js";
+import { classifyForeground, formatElapsed, gitOperationLabel, tabTitle } from "./context.js";
 
-const term = new Terminal({
-  cursorBlink: true,
-  fontSize: 13,
-  fontFamily: "Menlo, Monaco, Consolas, 'Cascadia Mono', 'Courier New', monospace",
-  theme: {
-    background: "#1e1e1e",
-    foreground: "#ddd",
-  },
-});
-const fitAddon = new FitAddon();
-term.loadAddon(fitAddon);
-term.open(document.getElementById("terminal"));
-fitAddon.fit();
-
-let shellExited = false;
-
-term.onData((data) => {
-  if (shellExited) {
-    if (data === "\r") restartShell();
-    return;
-  }
-  // bash only reports a command once it is done: Enter is enough to know one is running.
-  if (atPrompt && data.includes("\r")) {
-    atPrompt = false;
-    commandStartedAt = Date.now();
-    setTimeout(pollLiveState, 300);
-  }
-  invoke("write_to_pty", { data });
-});
-
-const URL_REGEX = /https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s"'\\]*/g;
-// CSI sequences (colors, cursor moves) and OSC sequences: Vite, for one, prints the port in bold.
-const ANSI_REGEX = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
-let lastServerUrl = null;
-// Tail of the recent output, so a URL split across two chunks is still found.
-let outputTail = "";
-
-listen("pty-data", (event) => {
-  term.write(event.payload);
-  outputTail = (outputTail + event.payload.replace(ANSI_REGEX, "")).slice(-1000);
-  const matches = outputTail.match(URL_REGEX);
-  if (matches) {
-    lastServerUrl = matches[matches.length - 1];
-  }
-});
-
-listen("pty-exit", (event) => {
-  shellExited = true;
-  atPrompt = false;
-  pendingCommand = null;
-  term.write(`\r\n\x1b[2m[Processus terminé (code ${event.payload}) — Entrée pour relancer]\x1b[0m\r\n`);
-});
-
-async function restartShell() {
-  shellExited = false;
-  term.reset();
-  await invoke("start_shell");
-  await syncSize();
-}
-
-async function syncSize() {
-  fitAddon.fit();
-  const { cols, rows } = term;
-  try {
-    await invoke("resize_pty", { cols, rows });
-  } catch {
-    // shell not started yet
-  }
-}
-
-window.addEventListener("resize", () => {
-  syncSize();
-});
-
+const terminalsEl = document.getElementById("terminals");
+const tabListEl = document.getElementById("tab-list");
 const fileTreeEl = document.getElementById("file-tree");
 const currentPathEl = document.getElementById("current-path");
 const gitBarEl = document.getElementById("git-bar");
@@ -89,11 +16,179 @@ const gitAheadBehindEl = document.getElementById("git-ahead-behind");
 const filterInputEl = document.getElementById("filter-input");
 const gitOperationEl = document.getElementById("git-operation");
 const gitOperationLabelEl = document.getElementById("git-operation-label");
+const sidebarEl = document.querySelector(".sidebar");
+const browseHintEl = document.getElementById("browse-hint");
+const claudePanelEl = document.getElementById("claude-panel");
+const serverPanelEl = document.getElementById("server-panel");
+const sshPanelEl = document.getElementById("ssh-panel");
+const claudeBranchEl = document.getElementById("claude-branch");
+const claudeHistoryEl = document.getElementById("claude-history");
+const serverUrlsEl = document.getElementById("server-urls");
+const sshHostEl = document.getElementById("ssh-host");
+const sshCwdEl = document.getElementById("ssh-cwd");
+const contextPanelEl = document.getElementById("context-panel");
+const contextTitleEl = document.getElementById("context-title");
+const contextDetailEl = document.getElementById("context-detail");
+const contextElapsedEl = document.getElementById("context-elapsed");
+const contextActionsEl = document.getElementById("context-actions");
+const commandHistoryEl = document.getElementById("command-history");
+const commandHistoryListEl = document.getElementById("command-history-list");
+
+let homeDir = null;
+
+// ---------------------------------------------------------------------------
+// Tabs: one Session per tab, the sidebar always shows the active one.
+
+const sessions = [];
+let active = null;
+let tabsKey = null;
+
+const sessionHooks = {
+  onPrompt: (session, finished) => onPrompt(session, finished),
+  // Pick up claude/ssh/a dev server quickly instead of waiting for the next tick.
+  onEnter: (session) => setTimeout(() => pollSession(session), 300),
+  onRemoteCwd: (session) => {
+    if (session === active && sidebarMode === "ssh") updateSshPanel(session);
+  },
+  onExit: (session) => {
+    renderTabs();
+    if (session === active) showSession(session);
+  },
+};
+
+listen("pty-data", (event) => {
+  sessionById(event.payload.id)?.receive(event.payload.data);
+});
+
+listen("pty-exit", (event) => {
+  sessionById(event.payload.id)?.handleExit(event.payload.code);
+});
+
+function sessionById(id) {
+  return sessions.find((session) => session.id === id);
+}
+
+// New tabs open in the active tab's folder, like most terminals.
+async function newTab(cwd = active?.cwd || homeDir) {
+  const session = new Session(terminalsEl, sessionHooks);
+  session.cwd = cwd;
+  sessions.push(session);
+  activate(session);
+  await session.start(cwd);
+}
+
+function closeTab(session) {
+  const index = sessions.indexOf(session);
+  if (index === -1) return;
+  sessions.splice(index, 1);
+  session.dispose();
+  if (sessions.length === 0) {
+    active = null;
+    newTab(homeDir);
+    return;
+  }
+  if (session === active) {
+    active = null;
+    activate(sessions[Math.min(index, sessions.length - 1)]);
+  } else {
+    renderTabs();
+  }
+}
+
+function activate(session) {
+  if (active && active !== session) active.hide();
+  active = session;
+  session.show();
+  renderTabs();
+  showSession(session);
+}
+
+function cycleTab(step) {
+  if (sessions.length < 2) return;
+  const index = sessions.indexOf(active);
+  activate(sessions[(index + step + sessions.length) % sessions.length]);
+}
+
+function renderTabs() {
+  const titles = sessions.map((s) => tabTitle(s.context, s.cwd, s.exited));
+  // Rebuilt only when something changed, so a click isn't lost to a re-render.
+  const key = titles.join("\0") + "\0" + sessions.indexOf(active);
+  if (key === tabsKey) return;
+  tabsKey = key;
+  tabListEl.innerHTML = "";
+  sessions.forEach((session, index) => {
+    const tab = document.createElement("div");
+    tab.className = session === active ? "tab active" : "tab";
+    tab.title = session.cwd || "";
+
+    const label = document.createElement("span");
+    label.className = "tab-label";
+    label.textContent = titles[index];
+
+    const close = document.createElement("button");
+    close.className = "tab-close";
+    close.textContent = "×";
+    close.title = "Fermer l'onglet (Ctrl+Maj+W)";
+    close.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeTab(session);
+    });
+
+    tab.append(label, close);
+    tab.addEventListener("click", () => activate(session));
+    // Middle click closes, as in browsers.
+    tab.addEventListener("auxclick", (event) => {
+      if (event.button === 1) closeTab(session);
+    });
+    tabListEl.appendChild(tab);
+  });
+}
+
+document.getElementById("new-tab").addEventListener("click", () => newTab());
+
+// Ctrl+Shift+T / Ctrl+Shift+W everywhere (Ctrl+T/W belong to the shell), Cmd+T on macOS,
+// Ctrl+Tab to cycle. Caught before xterm sees them.
+const isMac = navigator.userAgent.includes("Mac");
+window.addEventListener(
+  "keydown",
+  (event) => {
+    const key = event.key.toLowerCase();
+    let action = null;
+    if (event.ctrlKey && event.shiftKey && key === "t") action = () => newTab();
+    else if (isMac && event.metaKey && !event.shiftKey && key === "t") action = () => newTab();
+    else if (event.ctrlKey && event.shiftKey && key === "w") action = () => closeTab(active);
+    else if (event.ctrlKey && key === "tab") action = () => cycleTab(event.shiftKey ? -1 : 1);
+    if (!action) return;
+    event.preventDefault();
+    event.stopPropagation();
+    action();
+  },
+  true,
+);
+
+window.addEventListener("resize", () => {
+  active?.syncSize();
+});
+
+// Everything in the sidebar that depends on the tab: called when switching tabs.
+function showSession(session) {
+  contextKey = null;
+  serverUrlsKey = null;
+  applyContext(session);
+  renderHistory();
+  renderClaudeHistory();
+  const folder = session.cwd || homeDir;
+  if (folder && folder !== currentPathEl.textContent) renderRoot(folder);
+}
+
+// ---------------------------------------------------------------------------
+// File tree
+
+let currentGitEntries = {};
 let gitOperation = null;
 // Folder the tree shows; currentPathEl may point below it after a click on a folder.
 let treeRoot = "";
 let activeNodeEl = null;
-let currentGitEntries = {};
 const dirSizeCache = new Map();
 
 function formatBytes(bytes) {
@@ -135,7 +230,7 @@ async function refreshGitBar(path) {
       const conflicts = Object.values(currentGitEntries).filter((code) => code === "UU").length;
       gitOperationLabelEl.textContent = gitOperationLabel(gitOperation, conflicts);
     }
-    gitOperationEl.hidden = !gitOperation;
+    gitOperationEl.hidden = !gitOperation || sidebarMode !== "shell";
     applyGitBadges();
   } catch {
     currentGitEntries = {};
@@ -146,11 +241,16 @@ async function refreshGitBar(path) {
   }
 }
 
+// The tree may type into the terminal (cd, git…) only when the shell waits at its prompt.
+function canDriveShell() {
+  return Boolean(active?.idle);
+}
+
 // Typed at the prompt for the user, like the folder navigation.
 async function runAtPrompt(line) {
-  if (integration && !atPrompt) return;
-  await invoke("run_at_prompt", { line });
-  term.focus();
+  if (!canDriveShell()) return;
+  await invoke("run_at_prompt", { id: active.id, line });
+  active.term.focus();
 }
 
 document.getElementById("git-continue").addEventListener("click", () => {
@@ -214,6 +314,7 @@ const contextMenuEl = document.getElementById("context-menu");
 function openContextMenu(x, y, entry) {
   contextTarget = entry;
   contextMenuEl.querySelector('[data-action="mention-claude"]').hidden = sidebarMode !== "claude";
+  contextMenuEl.querySelector('[data-action="new-tab"]').hidden = !entry.is_dir;
   contextMenuEl.style.left = `${x}px`;
   contextMenuEl.style.top = `${y}px`;
   contextMenuEl.hidden = false;
@@ -239,6 +340,8 @@ contextMenuEl.querySelectorAll(".context-menu-item").forEach((item) => {
 
     if (action === "mention-claude") {
       mentionInClaude(target.path);
+    } else if (action === "new-tab") {
+      await newTab(target.path);
     } else if (action === "open-editor") {
       await invoke("open_in_editor", { path: target.path });
     } else if (action === "copy-path") {
@@ -368,15 +471,11 @@ function addFileHandlers(node, entry, setActive) {
 
 // Types "@path " in Claude Code's prompt, relative to the folder it runs in.
 function mentionInClaude(path) {
-  const base = liveCwd ? liveCwd + separatorOf(liveCwd) : null;
+  if (!active) return;
+  const base = active.cwd ? active.cwd + separatorOf(active.cwd) : null;
   const relative = base && path.startsWith(base) ? path.slice(base.length) : path;
-  invoke("write_to_pty", { data: `@${relative} ` });
-  term.focus();
-}
-
-// The tree may type into the terminal (cd) only when the shell waits at its prompt.
-function canDriveShell() {
-  return sidebarMode === "shell" && (!integration || atPrompt);
+  active.write(`@${relative} `);
+  active.term.focus();
 }
 
 async function buildChildren(path, depth) {
@@ -403,6 +502,8 @@ async function renderRoot(path) {
   currentPathEl.textContent = path;
   currentPathEl.title = path;
   const children = await buildChildren(path, 0);
+  // Another renderRoot started meanwhile (tab switch, prompt): it wins.
+  if (treeRoot !== path) return;
   fileTreeEl.innerHTML = "";
   treeContentEl = children;
   fileTreeEl.appendChild(children);
@@ -516,16 +617,15 @@ async function navigateTo(path) {
   // Never type a cd into a running command.
   if (!canDriveShell()) return;
   try {
-    await invoke("cd_to", { path });
+    await invoke("cd_to", { id: active.id, path });
   } catch {
     // shell not ready yet
   }
 }
 
 document.getElementById("go-home").addEventListener("click", async () => {
-  const home = await invoke("home_dir");
-  await navigateTo(home);
-  await renderRoot(home);
+  await navigateTo(homeDir);
+  await renderRoot(homeDir);
 });
 
 document.getElementById("go-up").addEventListener("click", async () => {
@@ -540,38 +640,18 @@ document.getElementById("go-up").addEventListener("click", async () => {
   }
 });
 
-const claudePanelEl = document.getElementById("claude-panel");
-const serverPanelEl = document.getElementById("server-panel");
-const sshPanelEl = document.getElementById("ssh-panel");
-const claudeBranchEl = document.getElementById("claude-branch");
-const claudeHistoryEl = document.getElementById("claude-history");
-const serverUrlsEl = document.getElementById("server-urls");
-const sshHostEl = document.getElementById("ssh-host");
-const sshCwdEl = document.getElementById("ssh-cwd");
+// ---------------------------------------------------------------------------
+// Contextual panels
 
-const contextPanelEl = document.getElementById("context-panel");
-const contextTitleEl = document.getElementById("context-title");
-const contextDetailEl = document.getElementById("context-detail");
-const contextElapsedEl = document.getElementById("context-elapsed");
-const contextActionsEl = document.getElementById("context-actions");
-const sidebarEl = document.querySelector(".sidebar");
-const browseHintEl = document.getElementById("browse-hint");
 let sidebarMode = "shell";
 let contextKey = null;
 let serverUrlsKey = null;
-let commandStartedAt = null;
 
 function setSidebarMode(mode) {
-  if (mode === sidebarMode) return;
-  // A URL printed by a server that has since stopped must not show up for the next one.
-  if (sidebarMode === "server") {
-    lastServerUrl = null;
-    outputTail = "";
-  }
   sidebarMode = mode;
-  contextKey = mode === "context" ? contextKey : null;
+  if (mode !== "context") contextKey = null;
   gitOperationEl.hidden = mode !== "shell" || !gitOperation;
-  commandHistoryEl.hidden = mode !== "shell" || commandHistory.length === 0;
+  commandHistoryEl.hidden = mode !== "shell" || !active || active.history.length === 0;
   // The tree stays usable whatever runs in the terminal, but no longer drives it.
   sidebarEl.classList.toggle("browsing", mode !== "shell");
   browseHintEl.hidden = mode === "shell";
@@ -583,6 +663,22 @@ function setSidebarMode(mode) {
   serverPanelEl.hidden = mode !== "server";
   sshPanelEl.hidden = mode !== "ssh";
   contextPanelEl.hidden = mode !== "context";
+}
+
+// Shows the panel matching the session's last known context, without any IPC.
+function applyContext(session) {
+  const context = session.context;
+  if (context.mode === "ssh") {
+    setSidebarMode("ssh");
+    updateSshPanel(session);
+  } else if (context.mode === "server") {
+    setSidebarMode("server");
+    updateServerPanel(context.urls);
+  } else if (context.mode === "context") {
+    showContextPanel(session);
+  } else {
+    setSidebarMode(context.mode);
+  }
 }
 
 function updateServerPanel(urls) {
@@ -615,7 +711,8 @@ function updateServerPanel(urls) {
 
 // Editor, pager, REPL or any other running command: one panel built from the
 // description classifyForeground returns.
-function showContextPanel(context) {
+function showContextPanel(session) {
+  const context = session.context;
   setSidebarMode("context");
   if (context.key !== contextKey) {
     contextKey = context.key;
@@ -628,110 +725,64 @@ function showContextPanel(context) {
       const button = document.createElement("button");
       button.textContent = action.label;
       button.addEventListener("click", () => {
-        invoke("write_to_pty", { data: action.keys });
-        term.focus();
+        active.write(action.keys);
+        active.term.focus();
       });
       contextActionsEl.appendChild(button);
     }
   }
   contextElapsedEl.hidden = !context.elapsed;
   if (context.elapsed) {
-    if (!commandStartedAt) commandStartedAt = Date.now();
-    contextElapsedEl.textContent = `Depuis ${formatElapsed(Date.now() - commandStartedAt)}`;
+    if (!session.commandStartedAt) session.commandStartedAt = Date.now();
+    contextElapsedEl.textContent = `Depuis ${formatElapsed(Date.now() - session.commandStartedAt)}`;
   }
+}
+
+function updateSshPanel(session) {
+  const command = session.context.command || "";
+  const match = command.match(/\S+@\S+/);
+  sshHostEl.textContent = match ? match[0] : command;
+  sshCwdEl.textContent = session.remoteCwd || "";
+  sshCwdEl.hidden = !session.remoteCwd;
 }
 
 document.getElementById("server-stop").addEventListener("click", () => {
-  invoke("write_to_pty", { data: String.fromCharCode(3) });
+  active?.write(String.fromCharCode(3));
 });
 
 document.getElementById("ssh-close").addEventListener("click", () => {
-  invoke("write_to_pty", { data: String.fromCharCode(4) });
+  active?.write(String.fromCharCode(4));
 });
 
-let liveCwd = null;
-
-// Shell integration (see shell_command in lib.rs): once the shell has reported a
-// prompt, the prompt itself tells us the cwd and that nothing is running, so the
-// ps/lsof polling only runs while a command is in the foreground.
-let integration = false;
-let atPrompt = false;
-let pendingCommand = null;
-let remoteCwd = null;
-const MAX_HISTORY = 30;
-const commandHistory = [];
-const commandHistoryEl = document.getElementById("command-history");
-const commandHistoryListEl = document.getElementById("command-history-list");
-
-term.parser.registerOscHandler(6973, (data) => {
-  const [kind, ...rest] = data.split(";");
-  if (kind === "prompt") {
-    onPrompt(Number(rest[0]) || 0, rest.slice(1).join(";"));
-  } else if (kind === "cmd") {
-    onCommandStart(rest.join(";"));
-  }
-  return true;
+document.querySelectorAll("#claude-panel [data-slash]").forEach((button) => {
+  button.addEventListener("click", () => {
+    if (!active) return;
+    const slash = button.dataset.slash;
+    active.write(`${slash}\r`);
+    active.claudeHistory.unshift(slash);
+    renderClaudeHistory();
+  });
 });
 
-// Standard OSC 7 (file://host/path), sent by some remote shells: shown in the SSH panel.
-term.parser.registerOscHandler(7, (data) => {
-  const match = data.match(/^file:\/\/([^/]*)(\/.*)$/);
-  if (match) {
-    let path = match[2];
-    try {
-      path = decodeURIComponent(path);
-    } catch {
-      // keep it encoded
-    }
-    remoteCwd = `${match[1]}:${path}`;
-    if (sidebarMode === "ssh") updateSshPanel();
-  }
-  return true;
+document.getElementById("claude-escape").addEventListener("click", () => {
+  active?.write(String.fromCharCode(27));
 });
 
-function onCommandStart(command) {
-  atPrompt = false;
-  pendingCommand = command;
-  commandStartedAt = Date.now();
-  lastServerUrl = null;
-  outputTail = "";
-  // Pick up claude/ssh/a dev server quickly instead of waiting for the next tick.
-  setTimeout(pollLiveState, 300);
-}
-
-async function onPrompt(code, cwd) {
-  integration = true;
-  atPrompt = true;
-  remoteCwd = null;
-  commandStartedAt = null;
-  setSidebarMode("shell");
-  const finished = pendingCommand;
-  pendingCommand = null;
-  if (finished) addToHistory(finished, code);
-
-  if (!cwd) return;
-  liveCwd = cwd;
-  // Also brings the tree back to the terminal's folder after browsing elsewhere.
-  if (cwd !== currentPathEl.textContent) {
-    await renderRoot(cwd);
-    return;
+function renderClaudeHistory() {
+  claudeHistoryEl.innerHTML = "";
+  for (const slash of active?.claudeHistory || []) {
+    const entry = document.createElement("div");
+    entry.className = "claude-history-entry";
+    entry.textContent = slash;
+    claudeHistoryEl.appendChild(entry);
   }
-  // The command may have changed files or the branch (git commit, checkout…).
-  if (finished) await refreshGitBar(treeRoot);
-}
-
-function addToHistory(command, code) {
-  const text = command.trim();
-  if (!text) return;
-  commandHistory.unshift({ text, code });
-  commandHistory.length = Math.min(commandHistory.length, MAX_HISTORY);
-  renderHistory();
 }
 
 function renderHistory() {
-  commandHistoryEl.hidden = commandHistory.length === 0;
+  const history = active?.history || [];
+  commandHistoryEl.hidden = history.length === 0 || sidebarMode !== "shell";
   commandHistoryListEl.innerHTML = "";
-  for (const { text, code } of commandHistory) {
+  for (const { text, code } of history) {
     const row = document.createElement("div");
     row.className = "command-history-entry";
     row.title = code === 0 ? "Cliquer pour réinsérer" : `Code de sortie ${code} — cliquer pour réinsérer`;
@@ -747,42 +798,68 @@ function renderHistory() {
     row.append(status, label);
     // Typed at the prompt without Enter, so it can be edited before running.
     row.addEventListener("click", () => {
-      if (!atPrompt) return;
-      invoke("write_to_pty", { data: text });
-      term.focus();
+      if (!active?.atPrompt) return;
+      active.write(text);
+      active.term.focus();
     });
     commandHistoryListEl.appendChild(row);
   }
 }
 
-function updateSshPanel(command) {
-  if (command !== undefined) {
-    const match = command.match(/\S+@\S+/);
-    sshHostEl.textContent = match ? match[0] : command;
-  }
-  sshCwdEl.textContent = remoteCwd || "";
-  sshCwdEl.hidden = !remoteCwd;
-}
+// ---------------------------------------------------------------------------
+// Live state
 
-async function pollLiveState() {
-  if (integration && atPrompt) return;
-
-  let foreground;
-  try {
-    foreground = await invoke("foreground_state");
-  } catch {
+async function onPrompt(session, finished) {
+  renderTabs();
+  if (session !== active) return;
+  applyContext(session);
+  renderHistory();
+  // Also brings the tree back to the terminal's folder after browsing elsewhere.
+  if (session.cwd && session.cwd !== currentPathEl.textContent) {
+    await renderRoot(session.cwd);
     return;
   }
-  // The prompt may have come back while ps was running.
-  if (integration && atPrompt) return;
+  // The command may have changed files or the branch (git commit, checkout…).
+  if (finished) await refreshGitBar(treeRoot);
+}
 
-  const context = classifyForeground(foreground, { lastServerUrl, pendingCommand });
-  if (context.mode !== "context" && context.mode !== "shell") commandStartedAt = null;
+function pollAll() {
+  for (const session of sessions) pollSession(session);
+}
 
-  if (context.mode === "claude") {
-    setSidebarMode("claude");
+async function pollSession(session) {
+  if (session.polling || session.exited || session.id === null) return;
+  if (session.integration && session.atPrompt) return;
+  session.polling = true;
+  try {
+    let foreground;
     try {
-      const cwd = integration ? liveCwd : await invoke("shell_cwd");
+      foreground = await invoke("foreground_state", { id: session.id });
+    } catch {
+      return;
+    }
+    // The prompt may have come back while ps was running.
+    if (session.integration && session.atPrompt) return;
+
+    const context = classifyForeground(foreground, {
+      lastServerUrl: session.lastServerUrl,
+      pendingCommand: session.pendingCommand,
+    });
+    if (session.mode === "server" && context.mode !== "server") session.forgetServerUrl();
+    if (context.mode !== "context" && context.mode !== "shell") session.commandStartedAt = null;
+    session.context = context;
+    renderTabs();
+    if (session === active) await updateActiveSidebar(session);
+  } finally {
+    session.polling = false;
+  }
+}
+
+async function updateActiveSidebar(session) {
+  applyContext(session);
+  if (session.mode === "claude") {
+    try {
+      const cwd = session.integration ? session.cwd : await invoke("shell_cwd", { id: session.id });
       const status = await invoke("git_status", { path: cwd });
       claudeBranchEl.textContent = `⎇ ${status.branch || "(détaché)"}`;
       // Files Claude edits show up in the tree as it works.
@@ -793,25 +870,14 @@ async function pollLiveState() {
     } catch {
       claudeBranchEl.textContent = "";
     }
-  } else if (context.mode === "ssh") {
-    setSidebarMode("ssh");
-    updateSshPanel(context.command);
-  } else if (context.mode === "server") {
-    setSidebarMode("server");
-    updateServerPanel(context.urls);
-  } else if (context.mode === "context") {
-    showContextPanel(context);
-  } else {
-    setSidebarMode("shell");
-    // With integration, the next prompt reports the cwd.
-    if (integration) return;
+  } else if (session.mode === "shell" && !session.integration) {
+    // Without shell integration (fish…), follow the shell's cwd by polling.
     try {
-      const cwd = await invoke("shell_cwd");
-      if (cwd && cwd !== liveCwd) {
-        liveCwd = cwd;
-        if (cwd !== currentPathEl.textContent) {
-          await renderRoot(cwd);
-        }
+      const cwd = await invoke("shell_cwd", { id: session.id });
+      if (cwd && cwd !== session.cwd) {
+        session.cwd = cwd;
+        renderTabs();
+        if (cwd !== currentPathEl.textContent) await renderRoot(cwd);
       }
     } catch {
       // ignore
@@ -819,29 +885,11 @@ async function pollLiveState() {
   }
 }
 
-document.querySelectorAll("#claude-panel [data-slash]").forEach((button) => {
-  button.addEventListener("click", () => {
-    const slash = button.dataset.slash;
-    invoke("write_to_pty", { data: `${slash}\r` });
-    const entry = document.createElement("div");
-    entry.className = "claude-history-entry";
-    entry.textContent = slash;
-    claudeHistoryEl.prepend(entry);
-  });
-});
-
-document.getElementById("claude-escape").addEventListener("click", () => {
-  invoke("write_to_pty", { data: String.fromCharCode(27) });
-});
-
 async function init() {
-  await invoke("start_shell");
-  await syncSize();
-  const home = await invoke("home_dir");
-  liveCwd = home;
-  await renderRoot(home);
-  term.focus();
-  setInterval(pollLiveState, 1000);
+  await invoke("close_all_shells");
+  homeDir = await invoke("home_dir");
+  await newTab(homeDir);
+  setInterval(pollAll, 1000);
 }
 
 init();

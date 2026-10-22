@@ -78,12 +78,17 @@
         </div>
       </aside>
       <main class="terminal-pane">
-        <div id="terminal"></div>
+        <div class="tab-bar">
+          <div id="tab-list" class="tab-list"></div>
+          <button id="new-tab" class="new-tab" title="Nouvel onglet (Ctrl+Maj+T)">+</button>
+        </div>
+        <div id="terminals" class="terminals"></div>
       </main>
     </div>
 
     <div id="context-menu" class="context-menu" hidden>
       <div class="context-menu-item" data-action="mention-claude" hidden>Mentionner dans Claude</div>
+      <div class="context-menu-item" data-action="new-tab" hidden>Nouvel onglet ici</div>
       <div class="context-menu-item" data-action="open-editor">Ouvrir dans l'éditeur</div>
       <div class="context-menu-item" data-action="copy-path">Copier le chemin</div>
       <div class="context-menu-item context-menu-danger" data-action="delete">Mettre à la corbeille</div>

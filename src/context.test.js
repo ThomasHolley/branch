@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyForeground, serverUrls, gitOperationLabel, formatElapsed } from "./context.js";
+import { classifyForeground, serverUrls, gitOperationLabel, formatElapsed, tabTitle } from "./context.js";
 
 const fg = (name, command = name, ports = []) => ({ name, command, ports });
 
@@ -65,4 +65,16 @@ test("libellés git et durée", () => {
   assert.equal(formatElapsed(5_000), "5 s");
   assert.equal(formatElapsed(125_000), "2 min 05 s");
   assert.equal(formatElapsed(3_900_000), "1 h 05 min");
+});
+
+test("titres d'onglets", () => {
+  assert.equal(tabTitle({ mode: "shell" }, "/Users/x/projet"), "projet");
+  assert.equal(tabTitle({ mode: "shell" }, "/"), "/");
+  assert.equal(tabTitle({ mode: "shell" }, "C:\\Users\\x"), "x");
+  assert.equal(tabTitle({ mode: "claude" }, "/a"), "✳ Claude");
+  assert.equal(tabTitle({ mode: "server", urls: ["http://localhost:5173/"] }, "/a"), "● :5173");
+  assert.equal(tabTitle({ mode: "ssh", command: "ssh -p 22 me@box" }, "/a"), "⇄ me@box");
+  assert.equal(tabTitle(classifyForeground(fg("nvim", "nvim src/main.js")), "/a"), "✎ main.js");
+  assert.equal(tabTitle(classifyForeground(fg("cargo", "/bin/cargo build")), "/a"), "▶ cargo");
+  assert.equal(tabTitle({ mode: "shell" }, "/a", true), "Terminé");
 });
