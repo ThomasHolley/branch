@@ -22,6 +22,14 @@
           <span id="git-ahead-behind" class="git-ahead-behind"></span>
         </div>
 
+        <div id="git-operation" class="git-operation" hidden>
+          <span id="git-operation-label"></span>
+          <div class="git-operation-actions">
+            <button id="git-continue">Continuer</button>
+            <button id="git-abort">Annuler</button>
+          </div>
+        </div>
+
         <div class="filter-row">
           <input id="filter-input" type="text" placeholder="Filtrer les fichiers..." />
         </div>
@@ -49,11 +57,15 @@
 
         <div id="server-panel" class="server-panel panel" hidden>
           <div class="claude-panel-title">Serveur de dev actif</div>
-          <div id="server-url-row" class="server-url-row">
-            <span id="server-url" class="server-url">URL non détectée</span>
-            <button id="server-open">Ouvrir</button>
-          </div>
+          <div id="server-urls" class="server-urls"></div>
           <button id="server-stop" class="server-stop">Arrêter (Ctrl+C)</button>
+        </div>
+
+        <div id="context-panel" class="context-panel panel" hidden>
+          <div id="context-title" class="claude-panel-title"></div>
+          <div id="context-detail" class="ssh-host"></div>
+          <div id="context-elapsed" class="context-elapsed" hidden></div>
+          <div id="context-actions" class="claude-actions"></div>
         </div>
 
         <div id="ssh-panel" class="ssh-panel panel" hidden>
