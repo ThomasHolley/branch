@@ -83,7 +83,9 @@ export class Session {
   }
 
   async start(cwd) {
-    this.id = await invoke("start_shell", { cwd: cwd || null });
+    // Fitted first so that the shell starts at the right size.
+    if (!this.el.hidden) this.fitAddon.fit();
+    this.id = await invoke("start_shell", { cwd: cwd || null, cols: this.term.cols, rows: this.term.rows });
     await this.syncSize();
   }
 

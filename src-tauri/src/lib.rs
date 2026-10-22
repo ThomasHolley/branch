@@ -459,18 +459,23 @@ fn foreground_state_of(shell_pid: u32) -> Result<ForegroundState, String> {
     Ok(ForegroundState { name, command: command_line, ports })
 }
 
-// Starts a new shell in `cwd` (the home folder if missing or gone) and returns its id.
+// Starts a new shell in `cwd` (the home folder if missing or gone), at the given
+// terminal size, and returns its id.
 #[tauri::command]
 fn start_shell(
     app: tauri::AppHandle,
     state: State<Sessions>,
     cwd: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
 ) -> Result<u32, String> {
     let pty_system = native_pty_system();
+    // Opened at the terminal's real size: a shell started at 80x24 and resized right
+    // after draws its first prompt for the wrong width (zsh then shows a stray "%").
     let pair = pty_system
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows: rows.filter(|&r| r > 0).unwrap_or(24),
+            cols: cols.filter(|&c| c > 0).unwrap_or(80),
             pixel_width: 0,
             pixel_height: 0,
         })
