@@ -27,6 +27,11 @@ term.onData((data) => {
     if (data === "\r") restartShell();
     return;
   }
+  // bash only reports a command once it is done: Enter is enough to know one is running.
+  if (atPrompt && data.includes("\r")) {
+    atPrompt = false;
+    setTimeout(pollLiveState, 300);
+  }
   invoke("write_to_pty", { data });
 });
 
@@ -49,6 +54,8 @@ listen("pty-data", (event) => {
 
 listen("pty-exit", (event) => {
   shellExited = true;
+  atPrompt = false;
+  pendingCommand = null;
   term.write(`\r\n\x1b[2m[Processus terminé (code ${event.payload}) — Entrée pour relancer]\x1b[0m\r\n`);
 });
 
@@ -326,6 +333,8 @@ filterInputEl.addEventListener("input", applyFilter);
 async function navigateTo(path) {
   currentPathEl.textContent = path;
   currentPathEl.title = path;
+  // Never type a cd into a running command.
+  if (integration && !atPrompt) return;
   try {
     await invoke("cd_to", { path });
   } catch {
@@ -358,6 +367,7 @@ const claudeBranchEl = document.getElementById("claude-branch");
 const claudeHistoryEl = document.getElementById("claude-history");
 const serverUrlEl = document.getElementById("server-url");
 const sshHostEl = document.getElementById("ssh-host");
+const sshCwdEl = document.getElementById("ssh-cwd");
 
 const SERVER_PROCESS_NAMES = new Set(["node", "npm", "yarn", "pnpm", "vite", "next-server"]);
 let sidebarMode = "shell";
@@ -373,6 +383,7 @@ function setSidebarMode(mode) {
   gitBarEl.hidden = mode !== "shell" || gitBarEl.dataset.hasRepo !== "true";
   fileTreeEl.hidden = mode !== "shell";
   document.querySelector(".filter-row").hidden = mode !== "shell";
+  commandHistoryEl.hidden = mode !== "shell" || commandHistory.length === 0;
   claudePanelEl.hidden = mode !== "claude";
   serverPanelEl.hidden = mode !== "server";
   sshPanelEl.hidden = mode !== "ssh";
@@ -396,18 +407,134 @@ document.getElementById("ssh-close").addEventListener("click", () => {
 
 let liveCwd = null;
 
+// Shell integration (see shell_command in lib.rs): once the shell has reported a
+// prompt, the prompt itself tells us the cwd and that nothing is running, so the
+// ps/lsof polling only runs while a command is in the foreground.
+let integration = false;
+let atPrompt = false;
+let pendingCommand = null;
+let remoteCwd = null;
+const MAX_HISTORY = 30;
+const commandHistory = [];
+const commandHistoryEl = document.getElementById("command-history");
+const commandHistoryListEl = document.getElementById("command-history-list");
+
+term.parser.registerOscHandler(6973, (data) => {
+  const [kind, ...rest] = data.split(";");
+  if (kind === "prompt") {
+    onPrompt(Number(rest[0]) || 0, rest.slice(1).join(";"));
+  } else if (kind === "cmd") {
+    onCommandStart(rest.join(";"));
+  }
+  return true;
+});
+
+// Standard OSC 7 (file://host/path), sent by some remote shells: shown in the SSH panel.
+term.parser.registerOscHandler(7, (data) => {
+  const match = data.match(/^file:\/\/([^/]*)(\/.*)$/);
+  if (match) {
+    let path = match[2];
+    try {
+      path = decodeURIComponent(path);
+    } catch {
+      // keep it encoded
+    }
+    remoteCwd = `${match[1]}:${path}`;
+    if (sidebarMode === "ssh") updateSshPanel();
+  }
+  return true;
+});
+
+function onCommandStart(command) {
+  atPrompt = false;
+  pendingCommand = command;
+  lastServerUrl = null;
+  outputTail = "";
+  // Pick up claude/ssh/a dev server quickly instead of waiting for the next tick.
+  setTimeout(pollLiveState, 300);
+}
+
+async function onPrompt(code, cwd) {
+  integration = true;
+  atPrompt = true;
+  remoteCwd = null;
+  setSidebarMode("shell");
+  const finished = pendingCommand;
+  pendingCommand = null;
+  if (finished) addToHistory(finished, code);
+
+  if (!cwd) return;
+  if (cwd !== liveCwd) {
+    liveCwd = cwd;
+    if (cwd !== currentPathEl.textContent) {
+      await renderRoot(cwd);
+      return;
+    }
+  }
+  // The command may have changed files or the branch (git commit, checkout…).
+  if (finished) await refreshGitBar(currentPathEl.textContent);
+}
+
+function addToHistory(command, code) {
+  const text = command.trim();
+  if (!text) return;
+  commandHistory.unshift({ text, code });
+  commandHistory.length = Math.min(commandHistory.length, MAX_HISTORY);
+  renderHistory();
+}
+
+function renderHistory() {
+  commandHistoryEl.hidden = commandHistory.length === 0;
+  commandHistoryListEl.innerHTML = "";
+  for (const { text, code } of commandHistory) {
+    const row = document.createElement("div");
+    row.className = "command-history-entry";
+    row.title = code === 0 ? "Cliquer pour réinsérer" : `Code de sortie ${code} — cliquer pour réinsérer`;
+
+    const status = document.createElement("span");
+    status.className = code === 0 ? "command-ok" : "command-failed";
+    status.textContent = code === 0 ? "✓" : `✗ ${code}`;
+
+    const label = document.createElement("span");
+    label.className = "command-text";
+    label.textContent = text;
+
+    row.append(status, label);
+    // Typed at the prompt without Enter, so it can be edited before running.
+    row.addEventListener("click", () => {
+      if (!atPrompt) return;
+      invoke("write_to_pty", { data: text });
+      term.focus();
+    });
+    commandHistoryListEl.appendChild(row);
+  }
+}
+
+function updateSshPanel(command) {
+  if (command !== undefined) {
+    const match = command.match(/\S+@\S+/);
+    sshHostEl.textContent = match ? match[0] : command;
+  }
+  sshCwdEl.textContent = remoteCwd || "";
+  sshCwdEl.hidden = !remoteCwd;
+}
+
 async function pollLiveState() {
+  if (integration && atPrompt) return;
+
   let name = "";
   try {
     name = await invoke("foreground_process");
   } catch {
     return;
   }
+  // The prompt may have come back while ps was running.
+  if (integration && atPrompt) return;
 
   if (name === "claude") {
     setSidebarMode("claude");
     try {
-      const cwd = await invoke("shell_cwd");
+      const cwd = integration ? liveCwd : await invoke("shell_cwd");
       const status = await invoke("git_status", { path: cwd });
       claudeBranchEl.textContent = `⎇ ${status.branch || "(détaché)"}`;
     } catch {
@@ -416,17 +543,17 @@ async function pollLiveState() {
   } else if (name === "ssh") {
     setSidebarMode("ssh");
     try {
-      const cmd = await invoke("foreground_command");
-      const match = cmd.match(/\S+@\S+/);
-      sshHostEl.textContent = match ? match[0] : cmd;
+      updateSshPanel(await invoke("foreground_command"));
     } catch {
-      sshHostEl.textContent = "";
+      updateSshPanel("");
     }
   } else if (SERVER_PROCESS_NAMES.has(name)) {
     setSidebarMode("server");
     updateServerPanel();
   } else {
     setSidebarMode("shell");
+    // With integration, the next prompt reports the cwd.
+    if (integration) return;
     try {
       const cwd = await invoke("shell_cwd");
       if (cwd && cwd !== liveCwd) {

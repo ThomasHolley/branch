@@ -1,0 +1,22 @@
+# Branch shell integration, loaded with bash --rcfile.
+# Restore the user's setup, then report to the app through a private OSC
+# sequence (ESC ] 6973 ; ... BEL), invisible in the terminal.
+[[ -r ~/.bashrc ]] && source ~/.bashrc
+
+_branch_last_history="$(HISTTIMEFORMAT= history 1)"
+
+_branch_prompt() {
+  local code=$?
+  # bash has no preexec: report the command once it is done, if history moved on.
+  local entry
+  entry="$(HISTTIMEFORMAT= history 1)"
+  if [[ "$entry" != "$_branch_last_history" ]]; then
+    _branch_last_history="$entry"
+    entry="${entry#*[0-9]  }"
+    printf '\e]6973;cmd;%s\a' "${entry//[$'\a'$'\e']/}"
+  fi
+  printf '\e]6973;prompt;%s;%s\a' "$code" "$PWD"
+  return $code
+}
+
+PROMPT_COMMAND="_branch_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"

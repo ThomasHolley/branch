@@ -28,6 +28,11 @@
 
         <div id="file-tree" class="file-tree panel"></div>
 
+        <div id="command-history" class="command-history" hidden>
+          <div class="claude-panel-subtitle">Commandes récentes</div>
+          <div id="command-history-list" class="command-history-list"></div>
+        </div>
+
         <div id="claude-panel" class="claude-panel panel" hidden>
           <div class="claude-panel-title">Session Claude Code</div>
           <div id="claude-branch" class="claude-branch"></div>
@@ -54,6 +59,7 @@
         <div id="ssh-panel" class="ssh-panel panel" hidden>
           <div class="claude-panel-title">Connexion SSH</div>
           <div id="ssh-host" class="ssh-host"></div>
+          <div id="ssh-cwd" class="ssh-cwd" title="Dossier distant (si le shell distant envoie OSC 7)" hidden></div>
           <button id="ssh-close">Fermer la connexion</button>
         </div>
       </aside>

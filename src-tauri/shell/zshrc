@@ -1,0 +1,19 @@
+# Branch shell integration: restore the user's setup, then report to the app
+# through a private OSC sequence (ESC ] 6973 ; ... BEL), invisible in the terminal.
+ZDOTDIR="$BRANCH_USER_ZDOTDIR"
+unset BRANCH_USER_ZDOTDIR
+[[ -r "$ZDOTDIR/.zshrc" ]] && source "$ZDOTDIR/.zshrc"
+
+_branch_precmd() {
+  local code=$?
+  printf '\e]6973;prompt;%s;%s\a' "$code" "$PWD"
+}
+
+_branch_preexec() {
+  printf '\e]6973;cmd;%s\a' "${1//[$'\a'$'\e']/}"
+}
+
+autoload -Uz add-zsh-hook
+add-zsh-hook preexec _branch_preexec
+# First, so that $? is still the exit code of the command.
+precmd_functions=(_branch_precmd $precmd_functions)

@@ -88,20 +88,72 @@ fn cwd_file() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("branch-cwd-{}.txt", std::process::id()))
 }
 
-// Wraps the user's prompt so every prompt records the current directory.
+// Shell integration: each prompt reports its exit code and cwd, and each command its
+// text, through a private OSC sequence the front end intercepts:
+//   ESC ] 6973 ; prompt ; <code> ; <cwd> BEL      ESC ] 6973 ; cmd ; <text> BEL
+// Shells without integration (fish…) fall back to polling ps/lsof.
+//
+// Wraps the user's prompt so every prompt records the current directory, and Enter
+// so every command is reported.
 // No double quotes in here: it goes through the Windows command line as a single argument.
 #[cfg(windows)]
 const PS_INIT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; \
 $OutputEncoding = [Text.Encoding]::UTF8; \
 $global:BranchPrompt = $function:prompt; \
 function global:prompt { \
-try { [IO.File]::WriteAllText($env:BRANCH_CWD_FILE, $executionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath) } catch {}; \
-& $global:BranchPrompt }";
+$ok = $?; $code = 0; if (-not $ok) { $code = 1; if ($global:LASTEXITCODE) { $code = $global:LASTEXITCODE } }; \
+$cwd = $executionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath; \
+try { [IO.File]::WriteAllText($env:BRANCH_CWD_FILE, $cwd) } catch {}; \
+([char]27 + ']6973;prompt;' + $code + ';' + $cwd + [char]7) + (& $global:BranchPrompt) }; \
+try { Set-PSReadLineKeyHandler -Chord Enter -ScriptBlock { \
+$line = $null; $cursor = $null; \
+[Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor); \
+[Console]::Write([char]27 + ']6973;cmd;' + ($line -replace '[\\x07\\x1b]', '') + [char]7); \
+[Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine() } } catch {}";
+
+#[cfg(not(windows))]
+const ZSHENV: &str = include_str!("../shell/zshenv");
+#[cfg(not(windows))]
+const ZSHRC: &str = include_str!("../shell/zshrc");
+#[cfg(not(windows))]
+const BASHRC: &str = include_str!("../shell/bashrc");
+
+// Writes the integration scripts to a temp dir and returns it.
+#[cfg(not(windows))]
+fn integration_dir() -> std::io::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join(format!("branch-shell-{}", std::process::id()));
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join(".zshenv"), ZSHENV)?;
+    fs::write(dir.join(".zshrc"), ZSHRC)?;
+    fs::write(dir.join("bashrc"), BASHRC)?;
+    Ok(dir)
+}
 
 #[cfg(not(windows))]
 fn shell_command() -> CommandBuilder {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    CommandBuilder::new(shell)
+    let name = Path::new(&shell)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut cmd = CommandBuilder::new(&shell);
+    let Ok(dir) = integration_dir() else {
+        return cmd;
+    };
+    match name.as_str() {
+        "zsh" => {
+            if let Some(user_zdotdir) = std::env::var_os("ZDOTDIR") {
+                cmd.env("BRANCH_USER_ZDOTDIR", user_zdotdir);
+            }
+            cmd.env("ZDOTDIR", &dir);
+        }
+        "bash" => {
+            cmd.arg("--rcfile");
+            cmd.arg(dir.join("bashrc"));
+        }
+        _ => {}
+    }
+    cmd
 }
 
 #[cfg(windows)]

@@ -326,6 +326,63 @@ body {
   font-family: Menlo, Monaco, Consolas, "Cascadia Mono", monospace;
 }
 
+.ssh-cwd {
+  font-size: 12px;
+  color: #999;
+  margin: -4px 0 10px;
+  font-family: Menlo, Monaco, Consolas, "Cascadia Mono", monospace;
+  word-break: break-all;
+}
+
+.command-history {
+  flex-shrink: 0;
+  max-height: 30%;
+  overflow-y: auto;
+  border-top: 1px solid #333;
+  padding: 0 8px 8px;
+}
+
+.command-history .claude-panel-subtitle {
+  margin: 10px 0 6px;
+}
+
+.command-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  font-family: Menlo, Monaco, Consolas, "Cascadia Mono", monospace;
+}
+
+.command-history-entry {
+  display: flex;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.command-history-entry:hover {
+  background: #2a2d2e;
+}
+
+.command-ok {
+  color: #73c991;
+  flex-shrink: 0;
+}
+
+.command-failed {
+  color: #f14c4c;
+  flex-shrink: 0;
+}
+
+.command-text {
+  color: #ccc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .terminal-pane {
   flex: 1;
   background: #1e1e1e;

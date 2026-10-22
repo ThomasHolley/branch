@@ -1,0 +1,9 @@
+# Branch shell integration, loaded through ZDOTDIR.
+# Load the user's .zshenv from their own ZDOTDIR, then point ZDOTDIR back here
+# so that zsh reads our .zshrc next.
+_branch_dir="$ZDOTDIR"
+ZDOTDIR="${BRANCH_USER_ZDOTDIR:-$HOME}"
+[[ -r "$ZDOTDIR/.zshenv" ]] && source "$ZDOTDIR/.zshenv"
+BRANCH_USER_ZDOTDIR="$ZDOTDIR"
+ZDOTDIR="$_branch_dir"
+unset _branch_dir
