@@ -33,3 +33,18 @@ Pour tester sans installer : `npm run tauri dev`.
 npm install
 npm run tauri build
 ```
+
+## Publier une version macOS (signée et notarisée)
+
+```
+./scripts/release-macos.sh 0.2.0
+```
+
+Le script met à jour le numéro de version (`package.json`, `tauri.conf.json`, `Cargo.toml`). Il compile ensuite une application universelle (Apple Silicon + Intel), la signe avec le certificat Developer ID, la fait notariser par Apple et agrafe le ticket. Il fait de même pour le DMG, puis vérifie le résultat avec Gatekeeper. Le DMG final est écrit dans `src-tauri/target/release-macos/`. Le script ne publie rien et ne commite rien.
+
+Prérequis (une seule fois) :
+
+- un certificat « Developer ID Application » dans le trousseau ;
+- un profil notarytool : `xcrun notarytool store-credentials branch-notary --apple-id <identifiant> --team-id <équipe>`.
+
+Variables facultatives : `BRANCH_SIGNING_IDENTITY` (nom du certificat, détecté automatiquement sinon) et `BRANCH_NOTARY_PROFILE` (`branch-notary` par défaut).

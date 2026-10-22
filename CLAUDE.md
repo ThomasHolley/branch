@@ -74,6 +74,10 @@ Le code spécifique à chaque OS passe par des paires `#[cfg(windows)]` / `#[cfg
 - Le nom de processus `"claude"` déclenche le panneau Claude Code. Les autres contextes sont définis dans [src/context.js](src/context.js).
 - Quand on ajoute une police, la pile doit garder des polices Windows (`Consolas`, `Cascadia Mono`) à côté de `Menlo` et `Monaco`.
 
+## Publier une version macOS
+
+`./scripts/release-macos.sh <version>` met à jour la version, compile en universel, signe (Developer ID), notarise et agrafe l'appli puis le DMG (`src-tauri/target/release-macos/`), et vérifie avec Gatekeeper. Il ne commite rien et ne publie rien : on commite ensuite le changement de version (`Version x.y.z`). Prérequis : certificat Developer ID dans le trousseau et profil notarytool `branch-notary`.
+
 ## Versionnage
 
 - `main` est la branche stable. On n'y commite pas directement.

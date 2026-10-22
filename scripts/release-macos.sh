@@ -129,6 +129,7 @@ spctl -a -t open --context context:primary-signature -vv "$DMG" 2>&1 | grep -q "
 lipo -archs "$APP/Contents/MacOS/branch"
 
 printf '\n\033[1;32mVersion %s prête :\033[0m\n  %s\n' "$VERSION" "$ROOT/$DMG"
-if [[ -n "$(git status --porcelain)" ]]; then
+VERSION_FILES=(package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock)
+if [[ -n "$(git status --porcelain -- "${VERSION_FILES[@]}")" ]]; then
   echo "Le numéro de version a changé : pensez à le commiter."
 fi
