@@ -211,6 +211,55 @@ body {
   overflow-y: auto;
 }
 
+/* Contextual panel shown above the file tree while a program runs in the terminal. */
+.context-card {
+  flex: 0 1 auto;
+  max-height: 50%;
+  overflow-y: auto;
+  border-bottom: 1px solid #333;
+  background: #2a2a2e;
+}
+
+/* The tree no longer follows the terminal: it is only browsed. */
+.browse-hint {
+  padding: 5px 10px;
+  font-size: 11px;
+  color: #a68cff;
+  background: #2a2733;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.sidebar.browsing .current-path {
+  color: #a68cff;
+}
+
+.sidebar.browsing .file-tree {
+  background: #232325;
+}
+
+.badge-dir {
+  background: none;
+  color: #e2c08d;
+  font-size: 14px;
+}
+
+.tree-node .search-dir {
+  margin-left: 6px;
+  color: #777;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.search-empty {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #888;
+}
+
 .claude-panel {
   padding: 12px 10px;
 }

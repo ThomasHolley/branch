@@ -30,18 +30,7 @@
           </div>
         </div>
 
-        <div class="filter-row">
-          <input id="filter-input" type="text" placeholder="Filtrer les fichiers..." />
-        </div>
-
-        <div id="file-tree" class="file-tree panel"></div>
-
-        <div id="command-history" class="command-history" hidden>
-          <div class="claude-panel-subtitle">Commandes récentes</div>
-          <div id="command-history-list" class="command-history-list"></div>
-        </div>
-
-        <div id="claude-panel" class="claude-panel panel" hidden>
+        <div id="claude-panel" class="claude-panel context-card" hidden>
           <div class="claude-panel-title">Session Claude Code</div>
           <div id="claude-branch" class="claude-branch"></div>
           <div class="claude-actions">
@@ -55,24 +44,37 @@
           <div id="claude-history" class="claude-history"></div>
         </div>
 
-        <div id="server-panel" class="server-panel panel" hidden>
+        <div id="server-panel" class="server-panel context-card" hidden>
           <div class="claude-panel-title">Serveur de dev actif</div>
           <div id="server-urls" class="server-urls"></div>
           <button id="server-stop" class="server-stop">Arrêter (Ctrl+C)</button>
         </div>
 
-        <div id="context-panel" class="context-panel panel" hidden>
+        <div id="context-panel" class="context-panel context-card" hidden>
           <div id="context-title" class="claude-panel-title"></div>
           <div id="context-detail" class="ssh-host"></div>
           <div id="context-elapsed" class="context-elapsed" hidden></div>
           <div id="context-actions" class="claude-actions"></div>
         </div>
 
-        <div id="ssh-panel" class="ssh-panel panel" hidden>
+        <div id="ssh-panel" class="ssh-panel context-card" hidden>
           <div class="claude-panel-title">Connexion SSH</div>
           <div id="ssh-host" class="ssh-host"></div>
           <div id="ssh-cwd" class="ssh-cwd" title="Dossier distant (si le shell distant envoie OSC 7)" hidden></div>
           <button id="ssh-close">Fermer la connexion</button>
+        </div>
+
+        <div class="filter-row">
+          <input id="filter-input" type="text" placeholder="Rechercher dans les sous-dossiers…" />
+        </div>
+
+        <div id="browse-hint" class="browse-hint" hidden></div>
+
+        <div id="file-tree" class="file-tree panel"></div>
+
+        <div id="command-history" class="command-history" hidden>
+          <div class="claude-panel-subtitle">Commandes récentes</div>
+          <div id="command-history-list" class="command-history-list"></div>
         </div>
       </aside>
       <main class="terminal-pane">
@@ -81,9 +83,10 @@
     </div>
 
     <div id="context-menu" class="context-menu" hidden>
+      <div class="context-menu-item" data-action="mention-claude" hidden>Mentionner dans Claude</div>
       <div class="context-menu-item" data-action="open-editor">Ouvrir dans l'éditeur</div>
       <div class="context-menu-item" data-action="copy-path">Copier le chemin</div>
-      <div class="context-menu-item context-menu-danger" data-action="delete">Supprimer</div>
+      <div class="context-menu-item context-menu-danger" data-action="delete">Mettre à la corbeille</div>
     </div>
   </body>
 </html>

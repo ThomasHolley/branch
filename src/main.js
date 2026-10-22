@@ -90,6 +90,8 @@ const filterInputEl = document.getElementById("filter-input");
 const gitOperationEl = document.getElementById("git-operation");
 const gitOperationLabelEl = document.getElementById("git-operation-label");
 let gitOperation = null;
+// Folder the tree shows; currentPathEl may point below it after a click on a folder.
+let treeRoot = "";
 let activeNodeEl = null;
 let currentGitEntries = {};
 const dirSizeCache = new Map();
@@ -162,13 +164,37 @@ document.getElementById("git-abort").addEventListener("click", () => {
   }
 });
 
+// Windows paths use backslashes, everything else forward slashes.
+function separatorOf(path) {
+  return path.includes("\\") && !path.includes("/") ? "\\" : "/";
+}
+
+function parentOf(path) {
+  const index = path.lastIndexOf(separatorOf(path));
+  return index > 0 ? path.slice(0, index) : null;
+}
+
+// Folders of the tree that contain a change somewhere below them.
+function changedFolders() {
+  const folders = new Set();
+  for (const path of Object.keys(currentGitEntries)) {
+    let parent = parentOf(path);
+    while (parent && parent.length > treeRoot.length && !folders.has(parent)) {
+      folders.add(parent);
+      parent = parentOf(parent);
+    }
+  }
+  return folders;
+}
+
 function applyGitBadges() {
+  const folders = changedFolders();
   fileTreeEl.querySelectorAll(".tree-node").forEach((node) => {
     const path = node.dataset.path;
     const existing = node.querySelector(".badge");
     if (existing) existing.remove();
     const code = currentGitEntries[path];
-    const badge = badgeForStatus(code);
+    const badge = badgeForStatus(code) || (folders.has(path) ? { label: "•", cls: "badge-dir" } : null);
     if (badge) {
       const span = document.createElement("span");
       span.className = `badge ${badge.cls}`;
@@ -187,6 +213,7 @@ const contextMenuEl = document.getElementById("context-menu");
 
 function openContextMenu(x, y, entry) {
   contextTarget = entry;
+  contextMenuEl.querySelector('[data-action="mention-claude"]').hidden = sidebarMode !== "claude";
   contextMenuEl.style.left = `${x}px`;
   contextMenuEl.style.top = `${y}px`;
   contextMenuEl.hidden = false;
@@ -210,18 +237,22 @@ contextMenuEl.querySelectorAll(".context-menu-item").forEach((item) => {
     closeContextMenu();
     if (!target) return;
 
-    if (action === "open-editor") {
+    if (action === "mention-claude") {
+      mentionInClaude(target.path);
+    } else if (action === "open-editor") {
       await invoke("open_in_editor", { path: target.path });
     } else if (action === "copy-path") {
       await writeText(target.path);
     } else if (action === "delete") {
-      const confirmed = window.confirm(`Supprimer définitivement "${target.name}" ?`);
+      const confirmed = window.confirm(`Mettre "${target.name}" à la corbeille ?`);
       if (confirmed) {
         try {
           await invoke("delete_path", { path: target.path });
           const parentPath = await invoke("parent_dir", { path: target.path });
-          if (currentPathEl.textContent === parentPath) {
+          if (treeRoot === parentPath) {
             await renderRoot(parentPath);
+          } else {
+            document.querySelector(`.tree-node[data-path="${CSS.escape(target.path)}"]`)?.remove();
           }
         } catch (e) {
           window.alert(`Échec de la suppression : ${e}`);
@@ -289,7 +320,6 @@ async function buildNode(entry, depth) {
       }
       node.after(childrenEl);
       applyGitBadges();
-      applyFilter();
     } else if (childrenEl) {
       childrenEl.remove();
     }
@@ -309,16 +339,44 @@ async function buildNode(entry, depth) {
 
     node.addEventListener("click", async () => {
       setActive();
+      // Browsing while a program runs: only unfold, the terminal is left alone.
+      if (!canDriveShell()) {
+        await setExpanded(!expanded);
+        return;
+      }
       await navigateTo(entry.path);
       if (!expanded) {
         await setExpanded(true);
       }
     });
   } else {
-    node.addEventListener("click", setActive);
+    addFileHandlers(node, entry, setActive);
   }
 
   return node;
+}
+
+function addFileHandlers(node, entry, setActive) {
+  node.addEventListener("click", () => {
+    setActive();
+    if (sidebarMode === "claude") mentionInClaude(entry.path);
+  });
+  node.addEventListener("dblclick", () => {
+    invoke("open_in_editor", { path: entry.path });
+  });
+}
+
+// Types "@path " in Claude Code's prompt, relative to the folder it runs in.
+function mentionInClaude(path) {
+  const base = liveCwd ? liveCwd + separatorOf(liveCwd) : null;
+  const relative = base && path.startsWith(base) ? path.slice(base.length) : path;
+  invoke("write_to_pty", { data: `@${relative} ` });
+  term.focus();
+}
+
+// The tree may type into the terminal (cd) only when the shell waits at its prompt.
+function canDriveShell() {
+  return sidebarMode === "shell" && (!integration || atPrompt);
 }
 
 async function buildChildren(path, depth) {
@@ -340,31 +398,123 @@ async function buildChildren(path, depth) {
 }
 
 async function renderRoot(path) {
-  fileTreeEl.innerHTML = "";
   activeNodeEl = null;
+  treeRoot = path;
   currentPathEl.textContent = path;
   currentPathEl.title = path;
   const children = await buildChildren(path, 0);
+  fileTreeEl.innerHTML = "";
+  treeContentEl = children;
   fileTreeEl.appendChild(children);
-  applyFilter();
+  searchResultsEl = null;
+  if (filterInputEl.value.trim()) runSearch();
   await refreshGitBar(path);
 }
 
-function applyFilter() {
-  const query = filterInputEl.value.trim().toLowerCase();
-  fileTreeEl.querySelectorAll(".tree-node").forEach((node) => {
-    const label = node.querySelector(".label").textContent.toLowerCase();
-    node.style.display = !query || label.includes(query) ? "flex" : "none";
-  });
+// The filter searches every subfolder of the tree root (find_files) and shows a flat
+// list in place of the tree; clearing it brings the tree back as it was.
+let treeContentEl = null;
+let searchResultsEl = null;
+let searchTimer = null;
+let searchSeq = 0;
+
+filterInputEl.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSearch, 150);
+});
+
+filterInputEl.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") clearSearch();
+});
+
+function clearSearch() {
+  filterInputEl.value = "";
+  runSearch();
 }
 
-filterInputEl.addEventListener("input", applyFilter);
+async function runSearch() {
+  const query = filterInputEl.value.trim();
+  const seq = ++searchSeq;
+  if (!query) {
+    searchResultsEl?.remove();
+    searchResultsEl = null;
+    if (treeContentEl) treeContentEl.hidden = false;
+    return;
+  }
+
+  let results = [];
+  try {
+    results = await invoke("find_files", { root: treeRoot, query });
+  } catch {
+    // unreadable root: show no results
+  }
+  if (seq !== searchSeq) return;
+
+  const container = document.createElement("div");
+  if (results.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "search-empty";
+    empty.textContent = "Aucun résultat";
+    container.appendChild(empty);
+  }
+  for (const entry of results) container.appendChild(buildSearchResult(entry));
+
+  searchResultsEl?.remove();
+  searchResultsEl = container;
+  if (treeContentEl) treeContentEl.hidden = true;
+  fileTreeEl.appendChild(container);
+  applyGitBadges();
+}
+
+function buildSearchResult(entry) {
+  const node = document.createElement("div");
+  node.className = "tree-node";
+  node.dataset.path = entry.path;
+
+  const icon = document.createElement("span");
+  icon.className = "icon";
+  icon.textContent = iconFor(entry);
+
+  const label = document.createElement("span");
+  label.className = "label";
+  label.textContent = entry.name;
+
+  // Where it is, relative to the tree root.
+  const folder = document.createElement("span");
+  folder.className = "search-dir";
+  const parent = parentOf(entry.path) || "";
+  folder.textContent = parent.length > treeRoot.length ? parent.slice(treeRoot.length + 1) : "";
+
+  node.append(icon, label, folder);
+
+  const setActive = () => {
+    if (activeNodeEl) activeNodeEl.classList.remove("active");
+    node.classList.add("active");
+    activeNodeEl = node;
+  };
+
+  if (entry.is_dir) {
+    node.addEventListener("click", async () => {
+      filterInputEl.value = "";
+      await navigateTo(entry.path);
+      await renderRoot(entry.path);
+    });
+  } else {
+    addFileHandlers(node, entry, setActive);
+  }
+
+  node.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    openContextMenu(event.clientX, event.clientY, entry);
+  });
+  return node;
+}
 
 async function navigateTo(path) {
   currentPathEl.textContent = path;
   currentPathEl.title = path;
   // Never type a cd into a running command.
-  if (integration && !atPrompt) return;
+  if (!canDriveShell()) return;
   try {
     await invoke("cd_to", { path });
   } catch {
@@ -404,6 +554,8 @@ const contextTitleEl = document.getElementById("context-title");
 const contextDetailEl = document.getElementById("context-detail");
 const contextElapsedEl = document.getElementById("context-elapsed");
 const contextActionsEl = document.getElementById("context-actions");
+const sidebarEl = document.querySelector(".sidebar");
+const browseHintEl = document.getElementById("browse-hint");
 let sidebarMode = "shell";
 let contextKey = null;
 let serverUrlsKey = null;
@@ -418,11 +570,15 @@ function setSidebarMode(mode) {
   }
   sidebarMode = mode;
   contextKey = mode === "context" ? contextKey : null;
-  gitBarEl.hidden = mode !== "shell" || gitBarEl.dataset.hasRepo !== "true";
   gitOperationEl.hidden = mode !== "shell" || !gitOperation;
-  fileTreeEl.hidden = mode !== "shell";
-  document.querySelector(".filter-row").hidden = mode !== "shell";
   commandHistoryEl.hidden = mode !== "shell" || commandHistory.length === 0;
+  // The tree stays usable whatever runs in the terminal, but no longer drives it.
+  sidebarEl.classList.toggle("browsing", mode !== "shell");
+  browseHintEl.hidden = mode === "shell";
+  browseHintEl.textContent =
+    mode === "claude"
+      ? "Navigation libre · clic sur un fichier : le mentionner dans Claude"
+      : "Navigation libre · le terminal n'est pas modifié";
   claudePanelEl.hidden = mode !== "claude";
   serverPanelEl.hidden = mode !== "server";
   sshPanelEl.hidden = mode !== "ssh";
@@ -554,15 +710,14 @@ async function onPrompt(code, cwd) {
   if (finished) addToHistory(finished, code);
 
   if (!cwd) return;
-  if (cwd !== liveCwd) {
-    liveCwd = cwd;
-    if (cwd !== currentPathEl.textContent) {
-      await renderRoot(cwd);
-      return;
-    }
+  liveCwd = cwd;
+  // Also brings the tree back to the terminal's folder after browsing elsewhere.
+  if (cwd !== currentPathEl.textContent) {
+    await renderRoot(cwd);
+    return;
   }
   // The command may have changed files or the branch (git commit, checkout…).
-  if (finished) await refreshGitBar(currentPathEl.textContent);
+  if (finished) await refreshGitBar(treeRoot);
 }
 
 function addToHistory(command, code) {
@@ -630,6 +785,11 @@ async function pollLiveState() {
       const cwd = integration ? liveCwd : await invoke("shell_cwd");
       const status = await invoke("git_status", { path: cwd });
       claudeBranchEl.textContent = `⎇ ${status.branch || "(détaché)"}`;
+      // Files Claude edits show up in the tree as it works.
+      if (cwd === treeRoot) {
+        currentGitEntries = status.entries || {};
+        applyGitBadges();
+      }
     } catch {
       claudeBranchEl.textContent = "";
     }
