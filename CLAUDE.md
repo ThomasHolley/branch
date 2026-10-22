@@ -4,7 +4,7 @@ Ce fichier guide Claude Code (claude.ai/code) pour travailler sur ce dépôt.
 
 ## Projet
 
-**Branch** : application desktop Tauri 2 qui associe un vrai terminal (xterm.js côté front, `portable-pty` côté Rust) à une arborescence de fichiers graphique. La sidebar change selon le processus au premier plan dans le terminal : shell, `claude`, `ssh` ou serveur de dev (`node`, `npm`, `vite`…).
+**Branch** : application desktop Tauri 2 qui associe un vrai terminal (xterm.js côté front, `portable-pty` côté Rust) à une arborescence de fichiers graphique. La sidebar change selon le processus au premier plan dans le terminal : shell, `claude`, `ssh` ou serveur de dev (`node`, `npm`, `vite`…). Cibles : macOS et Windows.
 
 L'interface, les messages et les commits sont en français.
 
@@ -32,19 +32,36 @@ Le projet tient dans très peu de fichiers :
 
 Flux principaux :
 
-- **PTY** : `start_shell` démarre `$SHELL` (`/bin/zsh` par défaut) dans `$HOME`. Un thread lit la sortie et l'émet dans l'événement `pty-data`. Le front renvoie les frappes via `write_to_pty` et appelle `resize_pty` quand la fenêtre change de taille.
-- **Polling** : `pollLiveState()` tourne toutes les secondes. Il appelle `foreground_process` (`ps -o tpgid=` puis `comm=`) et choisit le mode de la sidebar avec `setSidebarMode`. En mode shell, il appelle `shell_cwd` (`lsof -d cwd`) pour que l'arbre suive les `cd` tapés dans le terminal.
-- **Navigation** : un clic sur un dossier de l'arbre appelle `cd_to`, qui écrit `cd '…' && clear` dans le PTY.
+- **PTY** : `start_shell` démarre le shell dans le dossier personnel. Un thread lit la sortie et l'émet dans l'événement `pty-data`. Le front renvoie les frappes via `write_to_pty` et appelle `resize_pty` quand la fenêtre change de taille.
+- **Polling** : `pollLiveState()` tourne toutes les secondes. Il appelle `foreground_process` et choisit le mode de la sidebar avec `setSidebarMode`. En mode shell, il appelle `shell_cwd` pour que l'arbre suive les `cd` tapés dans le terminal.
+- **Navigation** : un clic sur un dossier de l'arbre appelle `cd_to`, qui écrit une commande `cd` dans le PTY.
 - **Git** : `git_status` lance `git status --porcelain=v2 --branch`. Les clés de `entries` sont des chemins absolus, qui doivent correspondre exactement à `data-path` des nœuds de l'arbre.
 - **Serveur de dev** : son URL est détectée par une regex (`URL_REGEX`) appliquée à la sortie du PTY.
-- **Éditeur** : `open_in_editor` essaie `code`, puis `open` en repli.
+
+## Multi-plateforme : points d'attention
+
+Le code spécifique à chaque OS passe par des paires `#[cfg(windows)]` / `#[cfg(not(windows))]`. Quand on modifie une fonction, il faut modifier les deux variantes.
+
+| Besoin | macOS / Unix | Windows |
+|---|---|---|
+| Shell | `$SHELL` (défaut `/bin/zsh`) | `powershell.exe` avec le script `PS_INIT` |
+| Dossier courant du shell | `lsof -d cwd` | le prompt PowerShell écrit dans le fichier `branch-cwd-<pid>.txt` du dossier temp (`BRANCH_CWD_FILE`) |
+| Processus au premier plan | `ps -o tpgid=` puis `comm=` / `args=` | `sysinfo` : on suit le plus récent enfant du shell. `node.exe` exécutant `claude-code` est renommé `claude` |
+| `cd_to` | `cd '…' && clear\n` | `Set-Location -LiteralPath '…'; Clear-Host\r` |
+| Ouvrir dans l'éditeur | `code` puis `open` | `code.cmd` puis l'appli par défaut (plugin opener) |
+| Fichiers cachés | commencent par `.` | `.` ou attribut `FILE_ATTRIBUTE_HIDDEN` |
 
 À retenir :
 
+- Toute commande externe lancée depuis Rust passe par le helper `command()`. Sinon, une fenêtre console s'ouvre brièvement sous Windows.
+- `PS_INIT` ne doit contenir aucun guillemet double, car il est passé comme un seul argument de ligne de commande Windows.
+- Les chemins renvoyés par git utilisent `/`. `repo_path()` les convertit en `\` sous Windows pour qu'ils correspondent aux clés de l'arbre.
+- Pour simuler Entrée dans le PTY depuis le front, on envoie `\r` (cela fonctionne sur les deux OS).
 - Le nom de processus `"claude"` déclenche le panneau Claude Code. La liste des serveurs de dev est dans `SERVER_PROCESS_NAMES` ([src/main.js](src/main.js)).
-- Le code de `main` ne vise que macOS/Unix (`ps`, `lsof`, `open`, `$HOME`).
+- Quand on ajoute une police, la pile doit garder des polices Windows (`Consolas`, `Cascadia Mono`) à côté de `Menlo` et `Monaco`.
 
-## Branches
+## Versionnage
 
-- `main` : version macOS.
-- `windows-support` : ajoute la prise en charge de Windows (PowerShell, `sysinfo`, polices, README). Elle n'est pas encore fusionnée dans `main`. Au moment de la fusion, il faudra compléter ce fichier avec les points d'attention multi-plateforme.
+- `main` est la branche stable. On n'y commite pas directement.
+- Une branche par chantier (`fix/…`, `feat/…`, `chore/…`), fusionnée dans `main` via une PR GitHub.
+- Avant la PR : `cargo check` (macOS et `--target x86_64-pc-windows-msvc`), `cargo test` et `npm run build`.
