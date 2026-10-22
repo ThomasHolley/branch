@@ -7,18 +7,12 @@ const URL_REGEX = /https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s"'\\]*/g;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 const MAX_HISTORY = 30;
 
-const TERMINAL_OPTIONS = {
-  cursorBlink: true,
-  fontSize: 13,
-  fontFamily: "Menlo, Monaco, Consolas, 'Cascadia Mono', 'Courier New', monospace",
-  theme: {
-    background: "#1e1e1e",
-    foreground: "#ddd",
-  },
-};
+const FONT_FAMILY = "Menlo, Monaco, Consolas, 'Cascadia Mono', 'Courier New', monospace";
 
 // One terminal tab: its xterm instance, its shell in the backend (by id) and what is
-// known about that shell. `hooks` lets main.js react to the shell integration:
+// known about that shell. `appearance` is { fontSize, theme } (an xterm theme object),
+// `shell` the shell to run (empty: the user's default). `hooks` lets main.js react to
+// the shell integration:
 // onPrompt(session, code), onCommandStart(session), onEnter(session),
 // onRemoteCwd(session), onExit(session, code).
 //
@@ -26,8 +20,9 @@ const TERMINAL_OPTIONS = {
 // prompt, the prompt itself tells the cwd and that nothing is running, so the ps/lsof
 // polling only runs while a command is in the foreground.
 export class Session {
-  constructor(container, hooks) {
+  constructor(container, hooks, appearance, shell) {
     this.hooks = hooks;
+    this.shell = shell || "";
     this.id = null;
     this.integration = false;
     this.atPrompt = false;
@@ -49,7 +44,12 @@ export class Session {
     this.el.hidden = true;
     container.appendChild(this.el);
 
-    this.term = new Terminal(TERMINAL_OPTIONS);
+    this.term = new Terminal({
+      cursorBlink: true,
+      fontFamily: FONT_FAMILY,
+      fontSize: appearance.fontSize,
+      theme: appearance.theme,
+    });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
     this.term.open(this.el);
@@ -85,7 +85,12 @@ export class Session {
   async start(cwd) {
     // Fitted first so that the shell starts at the right size.
     if (!this.el.hidden) this.fitAddon.fit();
-    this.id = await invoke("start_shell", { cwd: cwd || null, cols: this.term.cols, rows: this.term.rows });
+    this.id = await invoke("start_shell", {
+      cwd: cwd || null,
+      cols: this.term.cols,
+      rows: this.term.rows,
+      shell: this.shell || null,
+    });
     await this.syncSize();
   }
 
@@ -178,6 +183,13 @@ export class Session {
     } catch {
       // shell gone
     }
+  }
+
+  setAppearance({ fontSize, theme }) {
+    this.term.options.fontSize = fontSize;
+    this.term.options.theme = theme;
+    // The number of columns and rows changes with the font size.
+    this.syncSize();
   }
 
   show() {

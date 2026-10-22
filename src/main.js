@@ -5,6 +5,14 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import "@xterm/xterm/css/xterm.css";
 import { Session } from "./session.js";
 import { classifyForeground, formatElapsed, gitOperationLabel, tabTitle } from "./context.js";
+import {
+  DEFAULT_SETTINGS,
+  TERMINAL_THEMES,
+  clampFontSize,
+  loadSettings,
+  resolveTheme,
+  saveSettings,
+} from "./settings.js";
 
 const terminalsEl = document.getElementById("terminals");
 const tabListEl = document.getElementById("tab-list");
@@ -35,6 +43,93 @@ const commandHistoryEl = document.getElementById("command-history");
 const commandHistoryListEl = document.getElementById("command-history-list");
 
 let homeDir = null;
+
+// ---------------------------------------------------------------------------
+// Settings: font size, theme, editor, shell of new tabs.
+
+let settings = loadSettings();
+const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+
+function appearance() {
+  return {
+    fontSize: settings.fontSize,
+    theme: TERMINAL_THEMES[resolveTheme(settings.theme, systemDark.matches)],
+  };
+}
+
+function applyAppearance() {
+  document.documentElement.dataset.theme = resolveTheme(settings.theme, systemDark.matches);
+  const look = appearance();
+  for (const session of sessions) session.setAppearance(look);
+}
+
+systemDark.addEventListener("change", () => {
+  if (settings.theme === "system") applyAppearance();
+});
+
+function updateSettings(changes) {
+  settings = { ...settings, ...changes };
+  settings.fontSize = clampFontSize(settings.fontSize);
+  saveSettings(settings);
+  applyAppearance();
+  renderSettings();
+}
+
+const settingsEl = document.getElementById("settings");
+const fontSizeEl = document.getElementById("setting-font-size");
+const themeEl = document.getElementById("setting-theme");
+const editorEl = document.getElementById("setting-editor");
+const shellEl = document.getElementById("setting-shell");
+
+function renderSettings() {
+  fontSizeEl.textContent = `${settings.fontSize} px`;
+  themeEl.value = settings.theme;
+  if ([...editorEl.options].some((o) => o.value === settings.editor)) editorEl.value = settings.editor;
+  if ([...shellEl.options].some((o) => o.value === settings.shell)) shellEl.value = settings.shell;
+}
+
+// Editors and shells depend on the machine: asked to the backend once.
+async function loadSettingsChoices() {
+  const editors = await invoke("list_editors");
+  editorEl.innerHTML = "";
+  for (const { id, label } of editors) editorEl.add(new Option(label, id));
+  // The saved editor may have been uninstalled: the backend then uses the default app.
+  if (!editors.some((e) => e.id === settings.editor)) editorEl.value = "system";
+
+  const shells = await invoke("shell_choices");
+  shellEl.innerHTML = "";
+  shellEl.add(new Option(`Par défaut (${shells.default.split(/[\\/]/).pop()})`, ""));
+  for (const shell of shells.available) shellEl.add(new Option(shell, shell));
+  renderSettings();
+}
+
+function openSettings() {
+  renderSettings();
+  settingsEl.hidden = false;
+}
+
+function closeSettings() {
+  settingsEl.hidden = true;
+  active?.term.focus();
+}
+
+document.getElementById("open-settings").addEventListener("click", openSettings);
+document.getElementById("close-settings").addEventListener("click", closeSettings);
+settingsEl.addEventListener("click", (event) => {
+  if (event.target === settingsEl) closeSettings();
+});
+settingsEl.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeSettings();
+});
+document.getElementById("font-smaller").addEventListener("click", () => updateSettings({ fontSize: settings.fontSize - 1 }));
+document.getElementById("font-larger").addEventListener("click", () => updateSettings({ fontSize: settings.fontSize + 1 }));
+themeEl.addEventListener("change", () => updateSettings({ theme: themeEl.value }));
+editorEl.addEventListener("change", () => updateSettings({ editor: editorEl.value }));
+shellEl.addEventListener("change", () => updateSettings({ shell: shellEl.value }));
+
+function openInEditor(path) {
+  return invoke("open_in_editor", { path, editor: settings.editor });
+}
 
 // ---------------------------------------------------------------------------
 // Tabs: one Session per tab, the sidebar always shows the active one.
@@ -70,7 +165,7 @@ function sessionById(id) {
 
 // New tabs open in the active tab's folder, like most terminals.
 async function newTab(cwd = active?.cwd || homeDir) {
-  const session = new Session(terminalsEl, sessionHooks);
+  const session = new Session(terminalsEl, sessionHooks, appearance(), settings.shell);
   session.cwd = cwd;
   sessions.push(session);
   activate(session);
@@ -158,6 +253,13 @@ window.addEventListener(
     else if (isMac && event.metaKey && !event.shiftKey && key === "t") action = () => newTab();
     else if (event.ctrlKey && event.shiftKey && key === "w") action = () => closeTab(active);
     else if (event.ctrlKey && key === "tab") action = () => cycleTab(event.shiftKey ? -1 : 1);
+    // Cmd (macOS) or Ctrl with + / - / 0: text size, as in browsers.
+    else if ((isMac ? event.metaKey : event.ctrlKey) && !event.altKey) {
+      if (key === "=" || key === "+") action = () => updateSettings({ fontSize: settings.fontSize + 1 });
+      else if (key === "-") action = () => updateSettings({ fontSize: settings.fontSize - 1 });
+      else if (key === "0") action = () => updateSettings({ fontSize: DEFAULT_SETTINGS.fontSize });
+      else if (key === "," && isMac) action = openSettings;
+    }
     if (!action) return;
     event.preventDefault();
     event.stopPropagation();
@@ -339,7 +441,7 @@ contextMenuEl.querySelectorAll(".context-menu-item").forEach((item) => {
     } else if (action === "new-tab") {
       await newTab(target.path);
     } else if (action === "open-editor") {
-      await invoke("open_in_editor", { path: target.path });
+      await openInEditor(target.path);
     } else if (action === "copy-path") {
       await writeText(target.path);
     } else if (action === "delete") {
@@ -455,7 +557,7 @@ function addFileHandlers(node, entry, setActive) {
     if (sidebarMode === "claude") mentionInClaude(entry.path);
   });
   node.addEventListener("dblclick", () => {
-    invoke("open_in_editor", { path: entry.path });
+    openInEditor(entry.path);
   });
 }
 
@@ -874,6 +976,8 @@ async function updateActiveSidebar(session) {
 }
 
 async function init() {
+  applyAppearance();
+  loadSettingsChoices();
   await invoke("close_all_shells");
   homeDir = await invoke("home_dir");
   await newTab(homeDir);

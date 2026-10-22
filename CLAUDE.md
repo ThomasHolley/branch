@@ -32,8 +32,9 @@ Le projet tient dans très peu de fichiers :
 - [src/main.js](src/main.js) contient le frontend en JS vanilla, sans framework : les onglets, l'arbre de fichiers, le statut git, le menu contextuel et les panneaux de la sidebar. La sidebar affiche toujours la session de l'onglet actif (`active`).
 - [src/session.js](src/session.js) définit la classe `Session` : un onglet, avec son xterm, son shell côté backend (identifié par un `id`) et l'état rapporté par la shell integration (`atPrompt`, `cwd`, historique, contexte).
 - [src/context.js](src/context.js) contient `classifyForeground()` : à partir de `foreground_state` (nom, ligne de commande, ports en écoute), il choisit le panneau de la sidebar (claude, ssh, serveur, éditeur, pager, REPL, commande en cours, shell). C'est un module pur, sans DOM : on y ajoute les nouveaux contextes et leurs tests.
+- [src/settings.js](src/settings.js) gère les réglages (taille du texte, thème, éditeur, shell des nouveaux onglets), enregistrés dans le `localStorage` de la webview, ainsi que les palettes xterm des thèmes sombre et clair.
 - [index.html](index.html) définit la structure de la sidebar : les panneaux `file-tree`, `claude-panel`, `server-panel` et `ssh-panel`, plus le menu contextuel.
-- [src/styles.css](src/styles.css) : thème sombre.
+- [src/styles.css](src/styles.css) : toutes les couleurs sont des variables CSS (`:root`), redéfinies pour le thème clair dans `:root[data-theme="light"]`. Une nouvelle couleur doit être une variable déclarée dans les deux blocs. Seules les couleurs des badges git restent en dur.
 - [src-tauri/capabilities/default.json](src-tauri/capabilities/default.json) : permissions des plugins (opener, clipboard). Toute nouvelle API de plugin appelée depuis le front doit y être ajoutée.
 
 Flux principaux :
@@ -66,6 +67,7 @@ Le code spécifique à chaque OS passe par des paires `#[cfg(windows)]` / `#[cfg
 
 À retenir :
 
+- Sur macOS, `adopt_login_shell_path()` récupère au démarrage le `PATH` du shell de connexion. Une appli lancée depuis le Finder n'a que `/usr/bin:/bin…`, sans Homebrew, npm ni les lanceurs d'éditeurs.
 - Le shell reçoit `TERM=xterm-256color` et une locale UTF-8 si aucune n'est définie. Une appli lancée depuis le Finder n'a ni l'une ni l'autre ; sans `TERM`, zsh redessine la ligne avec des espaces (texte « espacé »).
 - Toute commande externe lancée depuis Rust passe par le helper `command()`. Sinon, une fenêtre console s'ouvre brièvement sous Windows.
 - `PS_INIT` ne doit contenir aucun guillemet double, car il est passé comme un seul argument de ligne de commande Windows.
