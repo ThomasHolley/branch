@@ -36,8 +36,9 @@ Le projet tient dans très peu de fichiers :
 Flux principaux :
 
 - **PTY** : `start_shell` démarre le shell dans le dossier personnel. Un thread lit la sortie et l'émet dans l'événement `pty-data`. Le front renvoie les frappes via `write_to_pty` et appelle `resize_pty` quand la fenêtre change de taille.
-- **Polling** : `pollLiveState()` tourne toutes les secondes. Il appelle `foreground_process` et choisit le mode de la sidebar avec `setSidebarMode`. En mode shell, il appelle `shell_cwd` pour que l'arbre suive les `cd` tapés dans le terminal.
-- **Navigation** : un clic sur un dossier de l'arbre appelle `cd_to`, qui écrit une commande `cd` dans le PTY.
+- **Shell integration** : le shell signale son état avec une séquence OSC privée, interceptée par xterm (`term.parser.registerOscHandler(6973, …)`). À chaque prompt, il envoie `ESC ] 6973 ; prompt ; <code> ; <cwd> BEL`. Au lancement d'une commande, il envoie `ESC ] 6973 ; cmd ; <texte> BEL`. Les scripts sont dans [src-tauri/shell/](src-tauri/shell/) : zsh via `ZDOTDIR` (le `.zshenv`/`.zshrc` de l'utilisateur reste chargé), bash via `--rcfile`. PowerShell utilise `PS_INIT` dans `lib.rs`. Ces séquences alimentent l'état `atPrompt`, le dossier courant et l'historique des commandes. L'OSC 7 standard, envoyé par certains shells distants, s'affiche dans le panneau SSH.
+- **Polling** : `pollLiveState()` tourne toutes les secondes, mais ne fait rien quand le shell est au prompt. Pendant une commande, il appelle `foreground_process` et choisit le mode de la sidebar avec `setSidebarMode`. Pour les shells sans intégration (fish…), il appelle aussi `shell_cwd` (`lsof`, ou fichier temporaire sous Windows).
+- **Navigation** : un clic sur un dossier de l'arbre appelle `cd_to`, qui écrit une commande `cd` dans le PTY, uniquement quand le shell est au prompt.
 - **Git** : `git_status` lance `git status --porcelain=v2 --branch`. Les clés de `entries` sont des chemins absolus, qui doivent correspondre exactement à `data-path` des nœuds de l'arbre.
 - **Serveur de dev** : son URL est détectée par une regex (`URL_REGEX`) appliquée à la sortie du PTY.
 
