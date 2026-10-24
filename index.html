@@ -15,6 +15,7 @@
           <button id="go-home" title="Aller au dossier personnel">🏠</button>
           <button id="go-up" title="Dossier parent">⬆</button>
           <span id="current-path" class="current-path"></span>
+          <button id="open-settings" title="Réglages">⚙</button>
         </div>
 
         <div id="git-bar" class="git-bar" hidden>
@@ -92,6 +93,39 @@
       <div class="context-menu-item" data-action="open-editor">Ouvrir dans l'éditeur</div>
       <div class="context-menu-item" data-action="copy-path">Copier le chemin</div>
       <div class="context-menu-item context-menu-danger" data-action="delete">Mettre à la corbeille</div>
+    </div>
+    <div id="settings" class="settings-overlay" hidden>
+      <div class="settings-panel" role="dialog" aria-labelledby="settings-title">
+        <div class="settings-header">
+          <span id="settings-title">Réglages</span>
+          <button id="close-settings" title="Fermer (Échap)">×</button>
+        </div>
+        <div class="settings-row">
+          <span class="settings-label">Taille du texte</span>
+          <div class="font-size-control">
+            <button id="font-smaller" title="Réduire (Cmd/Ctrl −)">−</button>
+            <span id="setting-font-size"></span>
+            <button id="font-larger" title="Agrandir (Cmd/Ctrl +)">+</button>
+          </div>
+        </div>
+        <label class="settings-row">
+          <span class="settings-label">Thème</span>
+          <select id="setting-theme">
+            <option value="dark">Sombre</option>
+            <option value="light">Clair</option>
+            <option value="system">Comme le système</option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span class="settings-label">Éditeur</span>
+          <select id="setting-editor"></select>
+        </label>
+        <label class="settings-row">
+          <span class="settings-label">Shell</span>
+          <select id="setting-shell"></select>
+        </label>
+        <div class="settings-note">Le shell choisi s'applique aux nouveaux onglets.</div>
+      </div>
     </div>
   </body>
 </html>

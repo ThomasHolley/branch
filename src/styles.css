@@ -1,3 +1,62 @@
+/* Colors, as variables so that the light theme only redefines them. */
+:root {
+  color-scheme: dark;
+  --bg: #1e1e1e;
+  --sidebar-bg: #252526;
+  --text: #ddd;
+  --text-strong: #e8e8e8;
+  --text-soft: #ccc;
+  --text-muted: #999;
+  --text-faint: #888;
+  --border: #333;
+  --button-bg: #333;
+  --button-hover: #3e3e3e;
+  --row-hover: #2a2d2e;
+  --row-active: #37373d;
+  --input-border: #3c3c3c;
+  --input-focus: #5a5a5a;
+  --menu-bg: #2d2d2d;
+  --menu-border: #454545;
+  --card-bg: #2a2a2e;
+  --chip-bg: #2a2a2a;
+  --accent: #a68cff;
+  --browse-bg: #2a2733;
+  --browse-tree-bg: #232325;
+  --warning-bg: #3a2f1a;
+  --warning-text: #e2c08d;
+  --danger: #f14c4c;
+  --ok: #73c991;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --sidebar-bg: #f3f3f3;
+  --text: #1f1f1f;
+  --text-strong: #111;
+  --text-soft: #333;
+  --text-muted: #6a6a6a;
+  --text-faint: #7a7a7a;
+  --border: #dcdcdc;
+  --button-bg: #e4e4e4;
+  --button-hover: #d4d4d4;
+  --row-hover: #e8e8e8;
+  --row-active: #d8d8de;
+  --input-border: #c8c8c8;
+  --input-focus: #999;
+  --menu-bg: #ffffff;
+  --menu-border: #cfcfcf;
+  --card-bg: #ececf1;
+  --chip-bg: #e6e6e6;
+  --accent: #6a4fd6;
+  --browse-bg: #efeafd;
+  --browse-tree-bg: #f8f7fc;
+  --warning-bg: #fff3d6;
+  --warning-text: #8a5a00;
+  --danger: #d32f2f;
+  --ok: #2e8b57;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -6,8 +65,8 @@ html,
 body {
   margin: 0;
   height: 100%;
-  background: #1e1e1e;
-  color: #ddd;
+  background: var(--bg);
+  color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   overflow: hidden;
 }
@@ -22,8 +81,8 @@ body {
   width: 260px;
   min-width: 180px;
   max-width: 420px;
-  background: #252526;
-  border-right: 1px solid #333;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -34,14 +93,14 @@ body {
   align-items: center;
   gap: 6px;
   padding: 8px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
 .sidebar-header button {
-  background: #333;
+  background: var(--button-bg);
   border: none;
-  color: #ddd;
+  color: var(--text);
   border-radius: 4px;
   padding: 4px 8px;
   cursor: pointer;
@@ -49,12 +108,12 @@ body {
 }
 
 .sidebar-header button:hover {
-  background: #3e3e3e;
+  background: var(--button-hover);
 }
 
 .current-path {
   font-size: 11px;
-  color: #999;
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -79,11 +138,11 @@ body {
 }
 
 .tree-node:hover {
-  background: #2a2d2e;
+  background: var(--row-hover);
 }
 
 .tree-node.active {
-  background: #37373d;
+  background: var(--row-active);
 }
 
 .tree-node .chevron {
@@ -91,7 +150,7 @@ body {
   flex-shrink: 0;
   text-align: center;
   font-size: 10px;
-  color: #888;
+  color: var(--text-faint);
   cursor: pointer;
 }
 
@@ -102,11 +161,11 @@ body {
 }
 
 .tree-node.is-dir .label {
-  color: #e8e8e8;
+  color: var(--text-strong);
 }
 
 .tree-node.is-file .label {
-  color: #bbb;
+  color: var(--text-soft);
 }
 
 .tree-children {
@@ -151,28 +210,28 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 6px 10px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--border);
   font-size: 12px;
-  color: #ccc;
+  color: var(--text-soft);
   flex-shrink: 0;
 }
 
 .git-ahead-behind {
-  color: #999;
+  color: var(--text-muted);
   font-size: 11px;
 }
 
 .filter-row {
   padding: 6px 8px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
 .filter-row input {
   width: 100%;
-  background: #1e1e1e;
-  border: 1px solid #3c3c3c;
-  color: #ddd;
+  background: var(--bg);
+  border: 1px solid var(--input-border);
+  color: var(--text);
   border-radius: 4px;
   padding: 5px 7px;
   font-size: 12px;
@@ -180,14 +239,14 @@ body {
 
 .filter-row input:focus {
   outline: none;
-  border-color: #5a5a5a;
+  border-color: var(--input-focus);
 }
 
 .context-menu {
   position: fixed;
   z-index: 1000;
-  background: #2d2d2d;
-  border: 1px solid #454545;
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   padding: 4px;
@@ -202,11 +261,11 @@ body {
 }
 
 .context-menu-item:hover {
-  background: #3e3e3e;
+  background: var(--button-hover);
 }
 
 .context-menu-danger {
-  color: #f14c4c;
+  color: var(--danger);
 }
 
 .panel {
@@ -219,37 +278,37 @@ body {
   flex: 0 1 auto;
   max-height: 50%;
   overflow-y: auto;
-  border-bottom: 1px solid #333;
-  background: #2a2a2e;
+  border-bottom: 1px solid var(--border);
+  background: var(--card-bg);
 }
 
 /* The tree no longer follows the terminal: it is only browsed. */
 .browse-hint {
   padding: 5px 10px;
   font-size: 11px;
-  color: #a68cff;
-  background: #2a2733;
-  border-bottom: 1px solid #333;
+  color: var(--accent);
+  background: var(--browse-bg);
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
 .sidebar.browsing .current-path {
-  color: #a68cff;
+  color: var(--accent);
 }
 
 .sidebar.browsing .file-tree {
-  background: #232325;
+  background: var(--browse-tree-bg);
 }
 
 .badge-dir {
   background: none;
-  color: #e2c08d;
+  color: var(--warning-text);
   font-size: 14px;
 }
 
 .tree-node .search-dir {
   margin-left: 6px;
-  color: #777;
+  color: var(--text-faint);
   font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -260,7 +319,7 @@ body {
 .search-empty {
   padding: 8px 12px;
   font-size: 12px;
-  color: #888;
+  color: var(--text-faint);
 }
 
 .claude-panel {
@@ -270,7 +329,7 @@ body {
 .claude-panel-title {
   font-size: 12px;
   font-weight: 600;
-  color: #a68cff;
+  color: var(--accent);
   margin-bottom: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -283,9 +342,9 @@ body {
 }
 
 .claude-actions button {
-  background: #333;
+  background: var(--button-bg);
   border: none;
-  color: #ddd;
+  color: var(--text);
   border-radius: 4px;
   padding: 6px 8px;
   text-align: left;
@@ -295,19 +354,19 @@ body {
 }
 
 .claude-actions button:hover {
-  background: #3e3e3e;
+  background: var(--button-hover);
 }
 
 .claude-branch {
   font-size: 12px;
-  color: #999;
+  color: var(--text-muted);
   margin-bottom: 10px;
 }
 
 .claude-panel-subtitle {
   font-size: 11px;
   font-weight: 600;
-  color: #888;
+  color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   margin: 16px 0 8px;
@@ -318,13 +377,13 @@ body {
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
-  color: #aaa;
+  color: var(--text-soft);
   font-family: Menlo, Monaco, Consolas, "Cascadia Mono", monospace;
 }
 
 .claude-history-entry {
   padding: 3px 6px;
-  background: #2a2a2a;
+  background: var(--chip-bg);
   border-radius: 3px;
 }
 
@@ -347,13 +406,13 @@ body {
 }
 
 .server-url-row.secondary .server-url {
-  color: #888;
+  color: var(--text-faint);
 }
 
 .server-url {
   flex: 1;
   font-size: 12px;
-  color: #ccc;
+  color: var(--text-soft);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -362,9 +421,9 @@ body {
 .server-url-row button,
 .server-stop,
 .ssh-panel button {
-  background: #333;
+  background: var(--button-bg);
   border: none;
-  color: #ddd;
+  color: var(--text);
   border-radius: 4px;
   padding: 6px 10px;
   cursor: pointer;
@@ -374,7 +433,7 @@ body {
 .server-url-row button:hover,
 .server-stop:hover,
 .ssh-panel button:hover {
-  background: #3e3e3e;
+  background: var(--button-hover);
 }
 
 .server-stop {
@@ -383,7 +442,7 @@ body {
 
 .ssh-host {
   font-size: 13px;
-  color: #ccc;
+  color: var(--text-soft);
   margin-bottom: 10px;
   font-family: Menlo, Monaco, Consolas, "Cascadia Mono", monospace;
 }
@@ -394,16 +453,16 @@ body {
 
 .context-elapsed {
   font-size: 12px;
-  color: #999;
+  color: var(--text-muted);
   margin: -4px 0 10px;
 }
 
 .git-operation {
   padding: 8px 10px;
-  border-bottom: 1px solid #333;
-  background: #3a2f1a;
+  border-bottom: 1px solid var(--border);
+  background: var(--warning-bg);
   font-size: 12px;
-  color: #e2c08d;
+  color: var(--warning-text);
   flex-shrink: 0;
 }
 
@@ -414,9 +473,9 @@ body {
 }
 
 .git-operation-actions button {
-  background: #333;
+  background: var(--button-bg);
   border: none;
-  color: #ddd;
+  color: var(--text);
   border-radius: 4px;
   padding: 4px 10px;
   cursor: pointer;
@@ -424,12 +483,12 @@ body {
 }
 
 .git-operation-actions button:hover {
-  background: #3e3e3e;
+  background: var(--button-hover);
 }
 
 .ssh-cwd {
   font-size: 12px;
-  color: #999;
+  color: var(--text-muted);
   margin: -4px 0 10px;
   font-family: Menlo, Monaco, Consolas, "Cascadia Mono", monospace;
   word-break: break-all;
@@ -439,7 +498,7 @@ body {
   flex-shrink: 0;
   max-height: 30%;
   overflow-y: auto;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--border);
   padding: 0 8px 8px;
 }
 
@@ -465,21 +524,21 @@ body {
 }
 
 .command-history-entry:hover {
-  background: #2a2d2e;
+  background: var(--row-hover);
 }
 
 .command-ok {
-  color: #73c991;
+  color: var(--ok);
   flex-shrink: 0;
 }
 
 .command-failed {
-  color: #f14c4c;
+  color: var(--danger);
   flex-shrink: 0;
 }
 
 .command-text {
-  color: #ccc;
+  color: var(--text-soft);
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -487,7 +546,7 @@ body {
 .terminal-pane {
   flex: 1;
   min-width: 0;
-  background: #1e1e1e;
+  background: var(--bg);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -496,8 +555,8 @@ body {
 .tab-bar {
   display: flex;
   align-items: stretch;
-  background: #252526;
-  border-bottom: 1px solid #333;
+  background: var(--sidebar-bg);
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   height: 32px;
 }
@@ -515,20 +574,20 @@ body {
   padding: 0 6px 0 12px;
   max-width: 200px;
   font-size: 12px;
-  color: #999;
-  border-right: 1px solid #333;
+  color: var(--text-muted);
+  border-right: 1px solid var(--border);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
 }
 
 .tab:hover {
-  background: #2a2d2e;
+  background: var(--row-hover);
 }
 
 .tab.active {
-  background: #1e1e1e;
-  color: #ddd;
+  background: var(--bg);
+  color: var(--text);
 }
 
 .tab-label {
@@ -540,7 +599,7 @@ body {
 .new-tab {
   background: none;
   border: none;
-  color: #888;
+  color: var(--text-faint);
   cursor: pointer;
   border-radius: 3px;
 }
@@ -559,8 +618,8 @@ body {
 
 .tab-close:hover,
 .new-tab:hover {
-  background: #3e3e3e;
-  color: #ddd;
+  background: var(--button-hover);
+  color: var(--text);
 }
 
 .new-tab {
@@ -576,4 +635,93 @@ body {
 .terminal-instance {
   position: absolute;
   inset: 8px;
+}
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-overlay[hidden] {
+  display: none;
+}
+
+.settings-panel {
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 14px 16px 16px;
+  font-size: 13px;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.settings-header button,
+.font-size-control button {
+  background: var(--button-bg);
+  border: none;
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  width: 26px;
+  height: 26px;
+}
+
+.settings-header button:hover,
+.font-size-control button:hover {
+  background: var(--button-hover);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+}
+
+.settings-label {
+  color: var(--text-soft);
+}
+
+.settings-row select {
+  min-width: 170px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.font-size-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#setting-font-size {
+  min-width: 44px;
+  text-align: center;
+}
+
+.settings-note {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-faint);
 }

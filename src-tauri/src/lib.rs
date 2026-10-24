@@ -190,8 +190,59 @@ fn utf8_lang(current: Option<&str>, system_locale: Option<&str>) -> Option<Strin
 }
 
 #[cfg(not(windows))]
-fn shell_command() -> CommandBuilder {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+}
+
+#[cfg(windows)]
+fn default_shell() -> String {
+    "powershell.exe".to_string()
+}
+
+// The shells offered in the settings.
+#[cfg(not(windows))]
+fn available_shells() -> Vec<String> {
+    let mut shells: Vec<String> = fs::read_to_string("/etc/shells")
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('/') && Path::new(line).exists())
+        .map(String::from)
+        .collect();
+    shells.dedup();
+    shells
+}
+
+#[cfg(windows)]
+fn available_shells() -> Vec<String> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    ["powershell.exe", "pwsh.exe", "cmd.exe"]
+        .iter()
+        .filter(|name| **name != "pwsh.exe" || find_in_path(name, &path).is_some())
+        .map(|name| name.to_string())
+        .collect()
+}
+
+#[derive(Serialize)]
+struct ShellChoices {
+    default: String,
+    available: Vec<String>,
+}
+
+#[tauri::command]
+fn shell_choices() -> ShellChoices {
+    ShellChoices {
+        default: default_shell(),
+        available: available_shells(),
+    }
+}
+
+// `shell` comes from the settings; empty or missing means the user's default shell.
+#[cfg(not(windows))]
+fn shell_command(shell: Option<String>) -> CommandBuilder {
+    let shell = shell
+        .filter(|s| !s.is_empty() && Path::new(s).exists())
+        .unwrap_or_else(default_shell);
     let name = Path::new(&shell)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -234,10 +285,18 @@ fn shell_command() -> CommandBuilder {
     cmd
 }
 
+// PowerShell (5 or 7) gets the integration; cmd.exe runs as is.
 #[cfg(windows)]
-fn shell_command() -> CommandBuilder {
-    let mut cmd = CommandBuilder::new("powershell.exe");
-    cmd.args(["-NoLogo", "-NoExit", "-Command", PS_INIT]);
+fn shell_command(shell: Option<String>) -> CommandBuilder {
+    let shell = shell.filter(|s| !s.is_empty()).unwrap_or_else(default_shell);
+    let mut cmd = CommandBuilder::new(&shell);
+    let name = Path::new(&shell)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if name == "powershell.exe" || name == "pwsh.exe" {
+        cmd.args(["-NoLogo", "-NoExit", "-Command", PS_INIT]);
+    }
     cmd
 }
 
@@ -468,6 +527,7 @@ fn start_shell(
     cwd: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    shell: Option<String>,
 ) -> Result<u32, String> {
     let pty_system = native_pty_system();
     // Opened at the terminal's real size: a shell started at 80x24 and resized right
@@ -482,7 +542,7 @@ fn start_shell(
         .map_err(|e| e.to_string())?;
 
     let id = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-    let mut cmd = shell_command();
+    let mut cmd = shell_command(shell);
     #[cfg(windows)]
     cmd.env("BRANCH_CWD_FILE", cwd_file(id));
     cmd.env("BRANCH_CD_FILE", cd_file(id));
@@ -732,32 +792,67 @@ async fn dir_size(path: String) -> Result<u64, String> {
     Ok(walk(Path::new(&path), &mut budget))
 }
 
+// Editors offered in the settings, by their command line launcher.
+struct Editor {
+    id: &'static str,
+    label: &'static str,
+    cli: &'static str,
+    windows_cli: Option<&'static str>,
+}
+
+const EDITORS: [Editor; 4] = [
+    Editor { id: "vscode", label: "VS Code", cli: "code", windows_cli: Some("code.cmd") },
+    Editor { id: "cursor", label: "Cursor", cli: "cursor", windows_cli: Some("cursor.cmd") },
+    Editor { id: "zed", label: "Zed", cli: "zed", windows_cli: None },
+    Editor { id: "sublime", label: "Sublime Text", cli: "subl", windows_cli: Some("subl.exe") },
+];
+
+fn find_in_path(name: &str, path_var: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    std::env::split_paths(path_var)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn editor_launcher(editor: &Editor) -> Option<std::path::PathBuf> {
+    let cli = if cfg!(windows) { editor.windows_cli? } else { editor.cli };
+    find_in_path(cli, &std::env::var_os("PATH").unwrap_or_default())
+}
+
+#[derive(Serialize)]
+struct EditorChoice {
+    id: String,
+    label: String,
+}
+
+// The installed editors, then the system's default application.
 #[tauri::command]
-async fn open_in_editor(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    // VS Code's launcher is a .cmd script on Windows
-    let code = if cfg!(windows) { "code.cmd" } else { "code" };
-    let code_result = command(code).arg(&path).status();
-    if matches!(code_result, Ok(status) if status.success()) {
-        return Ok(());
-    }
+async fn list_editors() -> Vec<EditorChoice> {
+    let mut choices: Vec<EditorChoice> = EDITORS
+        .iter()
+        .filter(|editor| editor_launcher(editor).is_some())
+        .map(|editor| EditorChoice { id: editor.id.to_string(), label: editor.label.to_string() })
+        .collect();
+    choices.push(EditorChoice {
+        id: "system".to_string(),
+        label: "Application par défaut".to_string(),
+    });
+    choices
+}
 
-    #[cfg(windows)]
-    {
-        use tauri_plugin_opener::OpenerExt;
-        app.opener()
-            .open_path(&path, None::<&str>)
-            .map_err(|e| e.to_string())
+// Opens with the editor chosen in the settings, or the default application when it
+// is "system" or not installed.
+#[tauri::command]
+async fn open_in_editor(app: tauri::AppHandle, path: String, editor: Option<String>) -> Result<(), String> {
+    let wanted = editor.unwrap_or_else(|| "vscode".to_string());
+    if let Some(launcher) = EDITORS.iter().find(|e| e.id == wanted).and_then(editor_launcher) {
+        if matches!(command(&launcher.to_string_lossy()).arg(&path).status(), Ok(s) if s.success()) {
+            return Ok(());
+        }
     }
-
-    #[cfg(not(windows))]
-    {
-        let _ = app;
-        command("open")
-            .arg(&path)
-            .status()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(&path, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 // Refuses what no click in the tree should ever delete: a filesystem root, the home
@@ -939,14 +1034,68 @@ async fn git_status(path: String) -> Result<GitStatus, String> {
     Ok(status)
 }
 
+// Text between two markers, to ignore whatever the shell's startup files print.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn between_markers<'a>(output: &'a str, marker: &str) -> Option<&'a str> {
+    let start = output.find(marker)? + marker.len();
+    let end = start + output[start..].find(marker)?;
+    Some(&output[start..end])
+}
+
+// An app opened from the Finder gets launchd's minimal PATH (/usr/bin:/bin:…), without
+// Homebrew, npm or the editors' launchers. Take the PATH of the user's login shell,
+// as Terminal.app would have it.
+#[cfg(target_os = "macos")]
+fn adopt_login_shell_path() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    const MARKER: &str = "__BRANCH_PATH__";
+    let script = format!("printf '{MARKER}%s{MARKER}' \"$PATH\"");
+    let Ok(mut child) = std::process::Command::new(default_shell())
+        .args(["-l", "-i", "-c", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    // A shell config waiting for input must not block the app's start.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                return;
+            }
+        }
+    }
+    let mut output = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut output);
+    }
+    if let Some(path) = between_markers(&output, MARKER).filter(|p| !p.is_empty()) {
+        // SAFETY: called first thing in run(), before any other thread exists.
+        unsafe { std::env::set_var("PATH", path) };
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    adopt_login_shell_path();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Sessions::default())
         .invoke_handler(tauri::generate_handler![
             start_shell,
+            shell_choices,
+            list_editors,
             close_shell,
             close_all_shells,
             write_to_pty,
@@ -1035,6 +1184,23 @@ mod tests {
         assert!(check_deletable(Path::new("/Users"), Some(home)).is_err());
         assert!(check_deletable(Path::new("/Users/me"), Some(home)).is_err());
         assert!(check_deletable(Path::new("projet"), Some(home)).is_err());
+    }
+
+    #[test]
+    fn markers() {
+        assert_eq!(between_markers("motd\n__M__/usr/bin:/bin__M__", "__M__"), Some("/usr/bin:/bin"));
+        assert_eq!(between_markers("__M__unterminated", "__M__"), None);
+    }
+
+    #[test]
+    fn path_lookup() {
+        let dir = std::env::temp_dir().join(format!("branch-path-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("fake-editor"), "").unwrap();
+        let path_var = std::env::join_paths([Path::new("/nonexistent"), dir.as_path()]).unwrap();
+        assert_eq!(find_in_path("fake-editor", &path_var), Some(dir.join("fake-editor")));
+        assert_eq!(find_in_path("absent", &path_var), None);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
