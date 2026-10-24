@@ -20,3 +20,18 @@ _branch_prompt() {
 }
 
 PROMPT_COMMAND="_branch_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+
+# Silent navigation from the sidebar: the app writes the folder to $BRANCH_CD_FILE and
+# sends Ctrl+Alt+Shift+F12. bash can't redraw its prompt from a key binding, so the
+# prompt text catches up at the next command.
+_branch_cd() {
+  local dir
+  dir="$(<"$BRANCH_CD_FILE")" || return
+  builtin cd -- "$dir" || return
+  printf '\e]6973;prompt;0;%s\a' "$PWD"
+}
+# bash 3.2 (macOS) can't bind -x a sequence starting with ESC: route it through C-x C-b.
+bind -x '"\C-x\C-b": _branch_cd' 2>/dev/null
+bind '"\e[24;8~": "\C-x\C-b"' 2>/dev/null
+bind -m vi-insert -x '"\C-x\C-b": _branch_cd' 2>/dev/null
+bind -m vi-insert '"\e[24;8~": "\C-x\C-b"' 2>/dev/null

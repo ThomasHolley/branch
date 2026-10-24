@@ -304,10 +304,6 @@ function applyGitBadges() {
   });
 }
 
-function iconFor(entry) {
-  return entry.is_dir ? "📁" : "📄";
-}
-
 let contextTarget = null;
 const contextMenuEl = document.getElementById("context-menu");
 
@@ -367,7 +363,7 @@ contextMenuEl.querySelectorAll(".context-menu-item").forEach((item) => {
 
 async function buildNode(entry, depth) {
   const node = document.createElement("div");
-  node.className = "tree-node";
+  node.className = entry.is_dir ? "tree-node is-dir" : "tree-node is-file";
   node.dataset.path = entry.path;
   node.style.paddingLeft = `${depth * 14}px`;
 
@@ -375,16 +371,11 @@ async function buildNode(entry, depth) {
   chevron.className = "chevron";
   chevron.textContent = entry.is_dir ? "▸" : "";
 
-  const icon = document.createElement("span");
-  icon.className = "icon";
-  icon.textContent = iconFor(entry);
-
   const label = document.createElement("span");
   label.className = "label";
   label.textContent = entry.name;
 
   node.appendChild(chevron);
-  node.appendChild(icon);
   node.appendChild(label);
 
   if (entry.is_dir) {
@@ -415,7 +406,6 @@ async function buildNode(entry, depth) {
   async function setExpanded(next) {
     expanded = next;
     chevron.textContent = expanded ? "▾" : "▸";
-    icon.textContent = expanded ? "📂" : "📁";
 
     if (expanded) {
       if (!childrenEl) {
@@ -569,16 +559,13 @@ async function runSearch() {
 
 function buildSearchResult(entry) {
   const node = document.createElement("div");
-  node.className = "tree-node";
+  node.className = entry.is_dir ? "tree-node is-dir" : "tree-node is-file";
   node.dataset.path = entry.path;
 
-  const icon = document.createElement("span");
-  icon.className = "icon";
-  icon.textContent = iconFor(entry);
-
+  // Without icons, a trailing slash tells folders apart.
   const label = document.createElement("span");
   label.className = "label";
-  label.textContent = entry.name;
+  label.textContent = entry.is_dir ? `${entry.name}/` : entry.name;
 
   // Where it is, relative to the tree root.
   const folder = document.createElement("span");
@@ -586,7 +573,7 @@ function buildSearchResult(entry) {
   const parent = parentOf(entry.path) || "";
   folder.textContent = parent.length > treeRoot.length ? parent.slice(treeRoot.length + 1) : "";
 
-  node.append(icon, label, folder);
+  node.append(label, folder);
 
   const setActive = () => {
     if (activeNodeEl) activeNodeEl.classList.remove("active");
@@ -617,7 +604,8 @@ async function navigateTo(path) {
   // Never type a cd into a running command.
   if (!canDriveShell()) return;
   try {
-    await invoke("cd_to", { id: active.id, path });
+    // With shell integration the cd is silent: no command line echoed in the terminal.
+    await invoke("cd_to", { id: active.id, path, silent: active.integration });
   } catch {
     // shell not ready yet
   }

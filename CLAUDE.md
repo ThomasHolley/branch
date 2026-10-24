@@ -42,7 +42,7 @@ Flux principaux :
 - **Shell integration** : le shell signale son état avec une séquence OSC privée, interceptée par xterm (`term.parser.registerOscHandler(6973, …)`). À chaque prompt, il envoie `ESC ] 6973 ; prompt ; <code> ; <cwd> BEL`. Au lancement d'une commande, il envoie `ESC ] 6973 ; cmd ; <texte> BEL`. Les scripts sont dans [src-tauri/shell/](src-tauri/shell/) : zsh via `ZDOTDIR` (le `.zshenv`/`.zshrc` de l'utilisateur reste chargé), bash via `--rcfile`. PowerShell utilise `PS_INIT` dans `lib.rs`. Ces séquences alimentent l'état `atPrompt`, le dossier courant et l'historique des commandes. L'OSC 7 standard, envoyé par certains shells distants, s'affiche dans le panneau SSH.
 - **Polling** : `pollLiveState()` tourne toutes les secondes, mais ne fait rien quand le shell est au prompt. Pendant une commande, il appelle `foreground_state` puis `classifyForeground()`. Un serveur de dev est reconnu à ses **ports TCP en écoute** (job au premier plan via `pgrep -g` + `lsof`, ou descendants du shell + `netstat` sous Windows), pas au nom du processus. Pour les shells sans intégration (fish…), il appelle aussi `shell_cwd` (`lsof`, ou fichier temporaire sous Windows).
 - **Navigation permanente** : l'arbre reste toujours visible. Le panneau du contexte (Claude, serveur, SSH, éditeur…) s'affiche au-dessus, sous forme de carte. Le comportement de l'arbre dépend de `canDriveShell()` :
-  - **mode shell, au prompt** : un clic sur un dossier appelle `cd_to` (le terminal suit), et le prompt suivant resynchronise l'arbre sur le dossier courant ;
+  - **mode shell, au prompt** : un clic sur un dossier appelle `cd_to` (le terminal suit), et le prompt suivant resynchronise l'arbre sur le dossier courant. Avec la shell integration, le `cd` est **silencieux** : le chemin est écrit dans `$BRANCH_CD_FILE` et la touche Ctrl+Alt+Maj+F12 (`\e[24;8~`), liée par les scripts d'intégration (widget zsh, `bind -x` bash via `C-x C-b`, handler PSReadLine), fait le `cd` sans afficher de commande ni perdre la saisie en cours ;
   - **sinon (« navigation libre », classe `.sidebar.browsing`)** : on déplie et on parcourt l'arbre sans jamais écrire dans le PTY. En mode Claude, un clic sur un fichier tape `@chemin` dans le prompt de Claude.
   - Partout : double-clic sur un fichier pour l'ouvrir dans l'éditeur, badges git propagés aux dossiers parents.
 - **Recherche** : le champ de filtre appelle `find_files` (recherche récursive bornée, qui ignore `node_modules`, `target`, `dist`…). Les résultats remplacent l'arbre sous forme de liste, Échap restaure l'arbre.
@@ -66,6 +66,7 @@ Le code spécifique à chaque OS passe par des paires `#[cfg(windows)]` / `#[cfg
 
 À retenir :
 
+- Le shell reçoit `TERM=xterm-256color` et une locale UTF-8 si aucune n'est définie. Une appli lancée depuis le Finder n'a ni l'une ni l'autre ; sans `TERM`, zsh redessine la ligne avec des espaces (texte « espacé »).
 - Toute commande externe lancée depuis Rust passe par le helper `command()`. Sinon, une fenêtre console s'ouvre brièvement sous Windows.
 - `PS_INIT` ne doit contenir aucun guillemet double, car il est passé comme un seul argument de ligne de commande Windows.
 - Les chemins renvoyés par git utilisent `/`. `repo_path()` les convertit en `\` sous Windows pour qu'ils correspondent aux clés de l'arbre.

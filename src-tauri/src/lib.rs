@@ -146,7 +146,10 @@ try { Set-PSReadLineKeyHandler -Chord Enter -ScriptBlock { \
 $line = $null; $cursor = $null; \
 [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor); \
 [Console]::Write([char]27 + ']6973;cmd;' + ($line -replace '[\\x07\\x1b]', '') + [char]7); \
-[Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine() } } catch {}";
+[Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine() }; \
+Set-PSReadLineKeyHandler -Chord Ctrl+Alt+Shift+F12 -ScriptBlock { \
+try { Set-Location -LiteralPath ([IO.File]::ReadAllText($env:BRANCH_CD_FILE)) } catch {}; \
+[Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt() } } catch {}";
 
 #[cfg(not(windows))]
 const ZSHENV: &str = include_str!("../shell/zshenv");
@@ -166,6 +169,26 @@ fn integration_dir() -> std::io::Result<std::path::PathBuf> {
     Ok(dir)
 }
 
+// The locale to give the shell when the app's own environment has no UTF-8 one (an app
+// launched from the Finder gets neither LANG nor TERM). Without it zsh counts bytes,
+// not characters, and the cursor drifts on accented text.
+#[cfg_attr(windows, allow(dead_code))]
+fn utf8_lang(current: Option<&str>, system_locale: Option<&str>) -> Option<String> {
+    if let Some(current) = current {
+        let lower = current.to_lowercase();
+        if lower.contains("utf-8") || lower.contains("utf8") {
+            return None;
+        }
+    }
+    // macOS AppleLocale looks like "fr_FR" or "fr_FR@rg=bezzzz".
+    let base = system_locale
+        .and_then(|l| l.split('@').next())
+        .map(str::trim)
+        .filter(|l| l.len() == 5 && l.as_bytes()[2] == b'_')
+        .unwrap_or("en_US");
+    Some(format!("{}.UTF-8", base))
+}
+
 #[cfg(not(windows))]
 fn shell_command() -> CommandBuilder {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
@@ -174,6 +197,24 @@ fn shell_command() -> CommandBuilder {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let mut cmd = CommandBuilder::new(&shell);
+    // What xterm.js understands. Without TERM, zsh falls back to a "dumb" terminal and
+    // redraws the line with spaces instead of moving the cursor.
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM_PROGRAM", "branch");
+    let current = ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .find_map(|var| std::env::var(var).ok().filter(|v| !v.is_empty()));
+    let system_locale = command("defaults")
+        .args(["read", "-g", "AppleLocale"])
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    if let Some(lang) = utf8_lang(current.as_deref(), system_locale.as_deref()) {
+        cmd.env("LANG", lang);
+        cmd.env_remove("LC_ALL");
+        cmd.env_remove("LC_CTYPE");
+    }
     let Ok(dir) = integration_dir() else {
         return cmd;
     };
@@ -210,6 +251,21 @@ fn prompt_line(line: &str) -> String {
 #[cfg(windows)]
 fn prompt_line(line: &str) -> String {
     format!("\x1b{}\r", line)
+}
+
+// Silent navigation: the path goes through this file and a key the shell integration
+// binds (Ctrl+Alt+Shift+F12) makes the shell cd to it without echoing a command line,
+// keeping whatever was being typed.
+fn cd_file(id: u32) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("branch-cd-{}-{}.txt", std::process::id(), id))
+}
+
+const SILENT_CD_KEY: &str = "\x1b[24;8~";
+
+fn remove_session_files(id: u32) {
+    let _ = fs::remove_file(cd_file(id));
+    #[cfg(windows)]
+    let _ = fs::remove_file(cwd_file(id));
 }
 
 #[cfg(not(windows))]
@@ -403,18 +459,23 @@ fn foreground_state_of(shell_pid: u32) -> Result<ForegroundState, String> {
     Ok(ForegroundState { name, command: command_line, ports })
 }
 
-// Starts a new shell in `cwd` (the home folder if missing or gone) and returns its id.
+// Starts a new shell in `cwd` (the home folder if missing or gone), at the given
+// terminal size, and returns its id.
 #[tauri::command]
 fn start_shell(
     app: tauri::AppHandle,
     state: State<Sessions>,
     cwd: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
 ) -> Result<u32, String> {
     let pty_system = native_pty_system();
+    // Opened at the terminal's real size: a shell started at 80x24 and resized right
+    // after draws its first prompt for the wrong width (zsh then shows a stray "%").
     let pair = pty_system
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows: rows.filter(|&r| r > 0).unwrap_or(24),
+            cols: cols.filter(|&c| c > 0).unwrap_or(80),
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -424,6 +485,7 @@ fn start_shell(
     let mut cmd = shell_command();
     #[cfg(windows)]
     cmd.env("BRANCH_CWD_FILE", cwd_file(id));
+    cmd.env("BRANCH_CD_FILE", cd_file(id));
     let start_dir = cwd
         .filter(|dir| Path::new(dir).is_dir())
         .map(std::ffi::OsString::from)
@@ -476,6 +538,7 @@ fn start_shell(
         let code = child.wait().map(|s| s.exit_code()).unwrap_or(1);
         // Already gone if the tab was closed: nobody to tell.
         let removed = app.state::<Sessions>().map.lock().unwrap().remove(&id);
+        remove_session_files(id);
         if removed.is_some() {
             let _ = app.emit("pty-exit", PtyExit { id, code });
         }
@@ -489,6 +552,7 @@ fn close_shell(id: u32, state: State<Sessions>) -> Result<(), String> {
     if let Some(session) = state.map.lock().unwrap().remove(&id) {
         let _ = session.killer.lock().unwrap().kill();
     }
+    remove_session_files(id);
     Ok(())
 }
 
@@ -523,9 +587,16 @@ fn resize_pty(id: u32, cols: u16, rows: u16, state: State<Sessions>) -> Result<(
         .map_err(|e| e.to_string())
 }
 
+// `silent` when the shell integration is active (it binds SILENT_CD_KEY); otherwise a
+// visible cd command is typed.
 #[tauri::command]
-fn cd_to(id: u32, path: String, state: State<Sessions>) -> Result<(), String> {
-    write_to_pty(id, cd_command(&path), state)
+fn cd_to(id: u32, path: String, silent: bool, state: State<Sessions>) -> Result<(), String> {
+    if silent {
+        fs::write(cd_file(id), &path).map_err(|e| e.to_string())?;
+        write_to_pty(id, SILENT_CD_KEY.to_string(), state)
+    } else {
+        write_to_pty(id, cd_command(&path), state)
+    }
 }
 
 #[tauri::command]
@@ -927,6 +998,16 @@ mod tests {
         assert_eq!(status.entries.get(&key("neuf dossier/a.txt")).map(String::as_str), Some("??"));
         // outside the requested folder, and the rename's original path is not an entry
         assert_eq!(status.entries.len(), 4);
+    }
+
+    #[test]
+    fn utf8_locale_only_when_missing() {
+        assert_eq!(utf8_lang(Some("fr_FR.UTF-8"), Some("fr_FR")), None);
+        assert_eq!(utf8_lang(Some("C.utf8"), None), None);
+        assert_eq!(utf8_lang(None, Some("fr_FR")).as_deref(), Some("fr_FR.UTF-8"));
+        assert_eq!(utf8_lang(Some("C"), Some("de_DE@rg=frzzzz")).as_deref(), Some("de_DE.UTF-8"));
+        assert_eq!(utf8_lang(None, Some("fr")).as_deref(), Some("en_US.UTF-8"));
+        assert_eq!(utf8_lang(None, None).as_deref(), Some("en_US.UTF-8"));
     }
 
     #[test]
