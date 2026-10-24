@@ -792,20 +792,30 @@ async fn dir_size(path: String) -> Result<u64, String> {
     Ok(walk(Path::new(&path), &mut budget))
 }
 
-// Editors offered in the settings, by their command line launcher.
+// Editors offered in the settings. On macOS an editor is found by its command line
+// launcher or, failing that, by its application bundle: VS Code's `code` command is
+// only there once installed from VS Code itself.
 struct Editor {
     id: &'static str,
     label: &'static str,
     cli: &'static str,
     windows_cli: Option<&'static str>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    mac_app: &'static str,
 }
 
 const EDITORS: [Editor; 4] = [
-    Editor { id: "vscode", label: "VS Code", cli: "code", windows_cli: Some("code.cmd") },
-    Editor { id: "cursor", label: "Cursor", cli: "cursor", windows_cli: Some("cursor.cmd") },
-    Editor { id: "zed", label: "Zed", cli: "zed", windows_cli: None },
-    Editor { id: "sublime", label: "Sublime Text", cli: "subl", windows_cli: Some("subl.exe") },
+    Editor { id: "vscode", label: "VS Code", cli: "code", windows_cli: Some("code.cmd"), mac_app: "Visual Studio Code.app" },
+    Editor { id: "cursor", label: "Cursor", cli: "cursor", windows_cli: Some("cursor.cmd"), mac_app: "Cursor.app" },
+    Editor { id: "zed", label: "Zed", cli: "zed", windows_cli: None, mac_app: "Zed.app" },
+    Editor { id: "sublime", label: "Sublime Text", cli: "subl", windows_cli: Some("subl.exe"), mac_app: "Sublime Text.app" },
 ];
+
+enum Launcher {
+    Cli(std::path::PathBuf),
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    MacApp(std::path::PathBuf),
+}
 
 fn find_in_path(name: &str, path_var: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
     std::env::split_paths(path_var)
@@ -813,9 +823,37 @@ fn find_in_path(name: &str, path_var: &std::ffi::OsStr) -> Option<std::path::Pat
         .find(|candidate| candidate.is_file())
 }
 
-fn editor_launcher(editor: &Editor) -> Option<std::path::PathBuf> {
-    let cli = if cfg!(windows) { editor.windows_cli? } else { editor.cli };
-    find_in_path(cli, &std::env::var_os("PATH").unwrap_or_default())
+// /Applications, then ~/Applications.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn find_mac_app(bundle: &str, home: Option<&Path>) -> Option<std::path::PathBuf> {
+    let mut dirs = vec![std::path::PathBuf::from("/Applications")];
+    if let Some(home) = home {
+        dirs.push(home.join("Applications"));
+    }
+    dirs.into_iter().map(|dir| dir.join(bundle)).find(|app| app.is_dir())
+}
+
+fn editor_launcher(editor: &Editor) -> Option<Launcher> {
+    let cli = if cfg!(windows) { editor.windows_cli } else { Some(editor.cli) };
+    if let Some(found) = cli.and_then(|cli| find_in_path(cli, &std::env::var_os("PATH").unwrap_or_default())) {
+        return Some(Launcher::Cli(found));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = home_path().map(std::path::PathBuf::from);
+        if let Some(app) = find_mac_app(editor.mac_app, home.as_deref()) {
+            return Some(Launcher::MacApp(app));
+        }
+    }
+    None
+}
+
+fn launch(launcher: &Launcher, path: &str) -> bool {
+    let status = match launcher {
+        Launcher::Cli(cli) => command(&cli.to_string_lossy()).arg(path).status(),
+        Launcher::MacApp(app) => command("open").arg("-a").arg(app).arg(path).status(),
+    };
+    matches!(status, Ok(s) if s.success())
 }
 
 #[derive(Serialize)]
@@ -845,7 +883,7 @@ async fn list_editors() -> Vec<EditorChoice> {
 async fn open_in_editor(app: tauri::AppHandle, path: String, editor: Option<String>) -> Result<(), String> {
     let wanted = editor.unwrap_or_else(|| "vscode".to_string());
     if let Some(launcher) = EDITORS.iter().find(|e| e.id == wanted).and_then(editor_launcher) {
-        if matches!(command(&launcher.to_string_lossy()).arg(&path).status(), Ok(s) if s.success()) {
+        if launch(&launcher, &path) {
             return Ok(());
         }
     }
@@ -1201,6 +1239,18 @@ mod tests {
         assert_eq!(find_in_path("fake-editor", &path_var), Some(dir.join("fake-editor")));
         assert_eq!(find_in_path("absent", &path_var), None);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mac_app_lookup() {
+        let home = std::env::temp_dir().join(format!("branch-apps-{}", std::process::id()));
+        fs::create_dir_all(home.join("Applications/Fake Editor.app")).unwrap();
+        assert_eq!(
+            find_mac_app("Fake Editor.app", Some(&home)),
+            Some(home.join("Applications/Fake Editor.app"))
+        );
+        assert_eq!(find_mac_app("Absent.app", Some(&home)), None);
+        fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]
