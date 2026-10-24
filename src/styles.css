@@ -139,6 +139,10 @@ body {
   background: #f14c4c;
 }
 
+.badge-conflict {
+  background: #c586c0;
+}
+
 .git-bar {
   display: flex;
   align-items: center;

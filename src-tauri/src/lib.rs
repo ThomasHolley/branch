@@ -1,16 +1,46 @@
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Mutex;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 struct PtyState {
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     shell_pid: Mutex<Option<u32>>,
+    killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
+}
+
+// Decodes as much of `pending` as possible, keeping a multi-byte character
+// split across two reads for the next call instead of turning it into U+FFFD.
+fn take_utf8(pending: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(s) => {
+                out.push_str(s);
+                pending.clear();
+                return out;
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                out.push_str(std::str::from_utf8(&pending[..valid]).unwrap_or_default());
+                match e.error_len() {
+                    Some(len) => {
+                        out.push('\u{FFFD}');
+                        pending.drain(..valid + len);
+                    }
+                    None => {
+                        pending.drain(..valid);
+                        return out;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -82,16 +112,18 @@ fn shell_command() -> CommandBuilder {
     cmd
 }
 
+// Both variants first clear whatever is already typed at the prompt (Ctrl+U for
+// zsh/bash, Escape for PSReadLine) so the cd isn't appended to it.
 #[cfg(not(windows))]
 fn cd_command(path: &str) -> String {
     let escaped = path.replace('\'', "'\\''");
-    format!("cd '{}' && clear\n", escaped)
+    format!("\x15cd '{}' && clear\n", escaped)
 }
 
 #[cfg(windows)]
 fn cd_command(path: &str) -> String {
     let escaped = path.replace('\'', "''");
-    format!("Set-Location -LiteralPath '{}'; Clear-Host\r", escaped)
+    format!("\x1bSet-Location -LiteralPath '{}'; Clear-Host\r", escaped)
 }
 
 #[cfg(not(windows))]
@@ -172,11 +204,20 @@ fn start_shell(app: tauri::AppHandle, state: State<PtyState>) -> Result<(), Stri
         cmd.cwd(home);
     }
 
-    let child = pair
+    // A reload of the webview calls start_shell again: don't leave the old shell running.
+    // Clearing the pid first stops the old shell's wait thread from reporting an exit.
+    *state.shell_pid.lock().unwrap() = None;
+    if let Some(mut killer) = state.killer.lock().unwrap().take() {
+        let _ = killer.kill();
+    }
+
+    let mut child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| e.to_string())?;
-    *state.shell_pid.lock().unwrap() = child.process_id();
+    let pid = child.process_id();
+    *state.shell_pid.lock().unwrap() = pid;
+    *state.killer.lock().unwrap() = Some(child.clone_killer());
 
     let mut reader = pair
         .master
@@ -187,19 +228,38 @@ fn start_shell(app: tauri::AppHandle, state: State<PtyState>) -> Result<(), Stri
     *state.writer.lock().unwrap() = Some(writer);
     *state.master.lock().unwrap() = Some(pair.master);
 
+    let reader_app = app.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
+        let mut pending = Vec::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
-                    if app.emit("pty-data", chunk).is_err() {
+                    pending.extend_from_slice(&buf[..n]);
+                    let chunk = take_utf8(&mut pending);
+                    if !chunk.is_empty() && reader_app.emit("pty-data", chunk).is_err() {
                         break;
                     }
                 }
                 Err(_) => break,
             }
+        }
+    });
+
+    // The reader doesn't always see EOF when the shell exits (ConPTY keeps the pipe open),
+    // so wait on the child itself and tell the front end.
+    std::thread::spawn(move || {
+        let code = child.wait().map(|s| s.exit_code()).unwrap_or(1);
+        let state = app.state::<PtyState>();
+        // Only clean up if no newer shell has replaced this one in the meantime.
+        let mut shell_pid = state.shell_pid.lock().unwrap();
+        if *shell_pid == pid {
+            *shell_pid = None;
+            *state.writer.lock().unwrap() = None;
+            *state.master.lock().unwrap() = None;
+            *state.killer.lock().unwrap() = None;
+            let _ = app.emit("pty-exit", code);
         }
     });
 
@@ -258,7 +318,7 @@ fn is_hidden(entry: &fs::DirEntry, file_name: &str) -> bool {
 }
 
 #[tauri::command]
-fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
+async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
     let dir = fs::read_dir(&path).map_err(|e| e.to_string())?;
     let mut entries: Vec<DirEntry> = dir
         .filter_map(|entry| entry.ok())
@@ -287,7 +347,7 @@ fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
 }
 
 #[tauri::command]
-fn foreground_process(state: State<PtyState>) -> Result<String, String> {
+async fn foreground_process(state: State<'_, PtyState>) -> Result<String, String> {
     let pid = state
         .shell_pid
         .lock()
@@ -317,7 +377,7 @@ fn foreground_process(state: State<PtyState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn foreground_command(state: State<PtyState>) -> Result<String, String> {
+async fn foreground_command(state: State<'_, PtyState>) -> Result<String, String> {
     let pid = state
         .shell_pid
         .lock()
@@ -345,7 +405,7 @@ fn foreground_command(state: State<PtyState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn shell_cwd(state: State<PtyState>) -> Result<String, String> {
+async fn shell_cwd(state: State<'_, PtyState>) -> Result<String, String> {
     let pid = state
         .shell_pid
         .lock()
@@ -396,7 +456,7 @@ fn parent_dir(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn dir_size(path: String) -> Result<u64, String> {
+async fn dir_size(path: String) -> Result<u64, String> {
     fn walk(path: &Path, budget: &mut u32) -> u64 {
         if *budget == 0 {
             return 0;
@@ -427,7 +487,7 @@ fn dir_size(path: String) -> Result<u64, String> {
 }
 
 #[tauri::command]
-fn open_in_editor(app: tauri::AppHandle, path: String) -> Result<(), String> {
+async fn open_in_editor(app: tauri::AppHandle, path: String) -> Result<(), String> {
     // VS Code's launcher is a .cmd script on Windows
     let code = if cfg!(windows) { "code.cmd" } else { "code" };
     let code_result = command(code).arg(&path).status();
@@ -455,7 +515,7 @@ fn open_in_editor(app: tauri::AppHandle, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_path(path: String) -> Result<(), String> {
+async fn delete_path(path: String) -> Result<(), String> {
     let p = Path::new(&path);
     if p.is_dir() {
         fs::remove_dir_all(p).map_err(|e| e.to_string())
@@ -465,8 +525,8 @@ fn delete_path(path: String) -> Result<(), String> {
 }
 
 // git prints forward slashes; on Windows the tree uses backslashes, so the keys must match.
-fn repo_path(toplevel: &str, relative: &str) -> String {
-    let full = Path::new(toplevel).join(relative).to_string_lossy().to_string();
+fn repo_path(base: &str, relative: &str) -> String {
+    let full = Path::new(base).join(relative).to_string_lossy().to_string();
     if cfg!(windows) {
         full.replace('/', "\\")
     } else {
@@ -474,62 +534,82 @@ fn repo_path(toplevel: &str, relative: &str) -> String {
     }
 }
 
+// Parses `git status --porcelain=v2 --branch -z`. git paths are relative to the
+// repository root; `prefix` (from `rev-parse --show-prefix`) is where `base` sits in
+// the repo, so keys are built from `base` itself and match the tree even through
+// symlinks. Files outside `base` are left out.
+fn parse_porcelain(output: &str, base: &str, prefix: &str) -> GitStatus {
+    let mut branch = None;
+    let mut ahead = 0;
+    let mut behind = 0;
+    let mut entries = HashMap::new();
+    let mut add = |path: &str, code: &str| {
+        if let Some(relative) = path.strip_prefix(prefix) {
+            entries.insert(repo_path(base, relative), code.to_string());
+        }
+    };
+
+    let mut records = output.split('\0');
+    while let Some(record) = records.next() {
+        if let Some(rest) = record.strip_prefix("# branch.head ") {
+            if rest != "(detached)" {
+                branch = Some(rest.to_string());
+            }
+        } else if let Some(rest) = record.strip_prefix("# branch.ab ") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() == 2 {
+                ahead = parts[0].trim_start_matches('+').parse().unwrap_or(0);
+                behind = parts[1].trim_start_matches('-').parse().unwrap_or(0);
+            }
+        } else if let Some(rest) = record.strip_prefix("1 ") {
+            // "1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>": the path may contain spaces
+            let fields: Vec<&str> = rest.splitn(8, ' ').collect();
+            if fields.len() == 8 {
+                add(fields[7], fields[0]);
+            }
+        } else if let Some(rest) = record.strip_prefix("2 ") {
+            // rename/copy: one more field (<X><score>), then the original path as its own record
+            let fields: Vec<&str> = rest.splitn(9, ' ').collect();
+            if fields.len() == 9 {
+                add(fields[8], fields[0]);
+            }
+            records.next();
+        } else if let Some(rest) = record.strip_prefix("u ") {
+            // unmerged: "u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>"
+            let fields: Vec<&str> = rest.splitn(10, ' ').collect();
+            if fields.len() == 10 {
+                add(fields[9], "UU");
+            }
+        } else if let Some(rest) = record.strip_prefix("? ") {
+            add(rest, "??");
+        }
+    }
+
+    GitStatus {
+        branch,
+        ahead,
+        behind,
+        entries,
+    }
+}
+
 #[tauri::command]
-fn git_status(path: String) -> Result<GitStatus, String> {
+async fn git_status(path: String) -> Result<GitStatus, String> {
     let out = command("git")
-        .args(["-C", &path, "status", "--porcelain=v2", "--branch"])
+        .args(["-C", &path, "status", "--porcelain=v2", "--branch", "-z"])
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err("not a git repository".to_string());
     }
 
-    let toplevel_out = command("git")
-        .args(["-C", &path, "rev-parse", "--show-toplevel"])
+    let prefix_out = command("git")
+        .args(["-C", &path, "rev-parse", "--show-prefix"])
         .output()
         .map_err(|e| e.to_string())?;
-    let toplevel = String::from_utf8_lossy(&toplevel_out.stdout).trim().to_string();
+    let prefix = String::from_utf8_lossy(&prefix_out.stdout).trim().to_string();
 
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut branch = None;
-    let mut ahead = 0;
-    let mut behind = 0;
-    let mut entries = HashMap::new();
-
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# branch.head ") {
-            if rest != "(detached)" {
-                branch = Some(rest.to_string());
-            }
-        } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() == 2 {
-                ahead = parts[0].trim_start_matches('+').parse().unwrap_or(0);
-                behind = parts[1].trim_start_matches('-').parse().unwrap_or(0);
-            }
-        } else if let Some(rest) = line.strip_prefix("1 ") {
-            // ordinary changed entry: "1 <xy> ... <path>"
-            let mut parts = rest.splitn(2, ' ');
-            let xy = parts.next().unwrap_or("");
-            if let Some(file_part) = line.rsplit(' ').next() {
-                entries.insert(repo_path(&toplevel, file_part), xy.to_string());
-            }
-        } else if let Some(rest) = line.strip_prefix("2 ") {
-            let xy = rest.split_whitespace().next().unwrap_or("");
-            if let Some(file_part) = line.rsplit(' ').next() {
-                entries.insert(repo_path(&toplevel, file_part), xy.to_string());
-            }
-        } else if let Some(rest) = line.strip_prefix("? ") {
-            entries.insert(repo_path(&toplevel, rest), "??".to_string());
-        }
-    }
-
-    Ok(GitStatus {
-        branch,
-        ahead,
-        behind,
-        entries,
-    })
+    Ok(parse_porcelain(&String::from_utf8_lossy(&out.stdout), &path, &prefix))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -541,6 +621,7 @@ pub fn run() {
             master: Mutex::new(None),
             writer: Mutex::new(None),
             shell_pid: Mutex::new(None),
+            killer: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             start_shell,
@@ -560,4 +641,53 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf8_split_across_reads() {
+        let bytes = "é".as_bytes();
+        let mut pending = vec![b'a', bytes[0]];
+        assert_eq!(take_utf8(&mut pending), "a");
+        pending.push(bytes[1]);
+        assert_eq!(take_utf8(&mut pending), "é");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn utf8_invalid_byte_is_replaced() {
+        let mut pending = vec![b'a', 0xff, b'b'];
+        assert_eq!(take_utf8(&mut pending), "a\u{FFFD}b");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn porcelain_spaces_renames_and_prefix() {
+        let output = [
+            "# branch.oid abc",
+            "# branch.head main",
+            "# branch.ab +2 -1",
+            "1 .M N... 100644 100644 100644 aaa bbb src/mon fichier.js",
+            "2 R. N... 100644 100644 100644 aaa bbb R100 src/nouveau.js",
+            "src/ancien.js",
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/conflit.js",
+            "? src/neuf dossier/a.txt",
+            "? README.md",
+            "",
+        ]
+        .join("\0");
+        let status = parse_porcelain(&output, "/repo/src", "src/");
+        assert_eq!(status.branch.as_deref(), Some("main"));
+        assert_eq!((status.ahead, status.behind), (2, 1));
+        let key = |p: &str| repo_path("/repo/src", p);
+        assert_eq!(status.entries.get(&key("mon fichier.js")).map(String::as_str), Some(".M"));
+        assert_eq!(status.entries.get(&key("nouveau.js")).map(String::as_str), Some("R."));
+        assert_eq!(status.entries.get(&key("conflit.js")).map(String::as_str), Some("UU"));
+        assert_eq!(status.entries.get(&key("neuf dossier/a.txt")).map(String::as_str), Some("??"));
+        // outside the requested folder, and the rename's original path is not an entry
+        assert_eq!(status.entries.len(), 4);
+    }
 }

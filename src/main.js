@@ -20,21 +20,44 @@ term.loadAddon(fitAddon);
 term.open(document.getElementById("terminal"));
 fitAddon.fit();
 
+let shellExited = false;
+
 term.onData((data) => {
+  if (shellExited) {
+    if (data === "\r") restartShell();
+    return;
+  }
   invoke("write_to_pty", { data });
 });
 
-const URL_REGEX = /https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s"'\\]*/;
+const URL_REGEX = /https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?[^\s"'\\]*/g;
+// CSI sequences (colors, cursor moves) and OSC sequences: Vite, for one, prints the port in bold.
+const ANSI_REGEX = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 let lastServerUrl = null;
+// Tail of the recent output, so a URL split across two chunks is still found.
+let outputTail = "";
 
 listen("pty-data", (event) => {
   term.write(event.payload);
-  const match = event.payload.match(URL_REGEX);
-  if (match) {
-    lastServerUrl = match[0];
+  outputTail = (outputTail + event.payload.replace(ANSI_REGEX, "")).slice(-1000);
+  const matches = outputTail.match(URL_REGEX);
+  if (matches) {
+    lastServerUrl = matches[matches.length - 1];
     updateServerPanel();
   }
 });
+
+listen("pty-exit", (event) => {
+  shellExited = true;
+  term.write(`\r\n\x1b[2m[Processus terminé (code ${event.payload}) — Entrée pour relancer]\x1b[0m\r\n`);
+});
+
+async function restartShell() {
+  shellExited = false;
+  term.reset();
+  await invoke("start_shell");
+  await syncSize();
+}
 
 async function syncSize() {
   fitAddon.fit();
@@ -75,6 +98,8 @@ function formatBytes(bytes) {
 function badgeForStatus(code) {
   if (!code) return null;
   if (code === "??") return { label: "U", cls: "badge-untracked" };
+  if (code === "UU") return { label: "C", cls: "badge-conflict" };
+  if (code.includes("R")) return { label: "R", cls: "badge-added" };
   if (code.includes("M")) return { label: "M", cls: "badge-modified" };
   if (code.includes("A")) return { label: "A", cls: "badge-added" };
   if (code.includes("D")) return { label: "D", cls: "badge-deleted" };
@@ -339,6 +364,11 @@ let sidebarMode = "shell";
 
 function setSidebarMode(mode) {
   if (mode === sidebarMode) return;
+  // A URL printed by a server that has since stopped must not show up for the next one.
+  if (sidebarMode === "server") {
+    lastServerUrl = null;
+    outputTail = "";
+  }
   sidebarMode = mode;
   gitBarEl.hidden = mode !== "shell" || gitBarEl.dataset.hasRepo !== "true";
   fileTreeEl.hidden = mode !== "shell";
@@ -349,9 +379,7 @@ function setSidebarMode(mode) {
 }
 
 function updateServerPanel() {
-  if (lastServerUrl) {
-    serverUrlEl.textContent = lastServerUrl;
-  }
+  serverUrlEl.textContent = lastServerUrl || "URL non détectée";
 }
 
 document.getElementById("server-open").addEventListener("click", () => {
