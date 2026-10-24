@@ -62,7 +62,7 @@ Le code spécifique à chaque OS passe par des paires `#[cfg(windows)]` / `#[cfg
 | Dossier courant du shell | `lsof -d cwd` | le prompt PowerShell écrit dans le fichier `branch-cwd-<pid>.txt` du dossier temp (`BRANCH_CWD_FILE`) |
 | Processus au premier plan | `ps -o tpgid=` puis `comm=` / `args=`, ports : `pgrep -g` + `lsof` | `sysinfo` : on suit le plus récent enfant du shell. `node.exe` exécutant `claude-code` est renommé `claude`. Ports : `netstat -ano` |
 | `cd_to` | `cd '…' && clear\n` | `Set-Location -LiteralPath '…'; Clear-Host\r` |
-| Ouvrir dans l'éditeur | `code` puis `open` | `code.cmd` puis l'appli par défaut (plugin opener) |
+| Ouvrir dans l'éditeur | éditeur des réglages : commande (`code`…) ou appli dans `/Applications` (`open -a`), sinon appli par défaut | commande (`code.cmd`…), sinon appli par défaut (plugin opener) |
 | Fichiers cachés | commencent par `.` | `.` ou attribut `FILE_ATTRIBUTE_HIDDEN` |
 
 À retenir :
