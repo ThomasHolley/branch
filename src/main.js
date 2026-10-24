@@ -328,6 +328,10 @@ async function refreshGitBar(path) {
     if (status.behind) parts.push(`↓${status.behind}`);
     gitAheadBehindEl.textContent = parts.join(" ");
     gitOperation = status.operation || null;
+    if ((status.git_dir || null) !== gitDir) {
+      gitDir = status.git_dir || null;
+      scheduleWatchUpdate();
+    }
     if (gitOperation) {
       const conflicts = Object.values(currentGitEntries).filter((code) => code === "UU").length;
       gitOperationLabelEl.textContent = gitOperationLabel(gitOperation, conflicts);
@@ -510,15 +514,22 @@ async function buildNode(entry, depth) {
     chevron.textContent = expanded ? "▾" : "▸";
 
     if (expanded) {
+      const cached = Boolean(childrenEl);
       if (!childrenEl) {
         childrenEl = await buildChildren(entry.path, depth + 1);
       }
       node.after(childrenEl);
+      // Kept from a previous unfold: files may have changed while it was folded.
+      if (cached) await refreshDir(entry.path);
       applyGitBadges();
     } else if (childrenEl) {
       childrenEl.remove();
     }
+    scheduleWatchUpdate();
   }
+
+  // For refreshDir: the unfolded children that follow this node in its wrapper.
+  node.unfoldedChildren = () => (expanded ? childrenEl : null);
 
   function setActive() {
     if (activeNodeEl) activeNodeEl.classList.remove("active");
@@ -573,6 +584,8 @@ function mentionInClaude(path) {
 async function buildChildren(path, depth) {
   const wrapper = document.createElement("div");
   wrapper.className = "tree-children-wrapper";
+  wrapper.dataset.dir = path;
+  wrapper.dataset.depth = depth;
   try {
     const entries = await invoke("list_dir", { path });
     for (const entry of entries) {
@@ -602,6 +615,88 @@ async function renderRoot(path) {
   searchResultsEl = null;
   if (filterInputEl.value.trim()) runSearch();
   await refreshGitBar(path);
+  scheduleWatchUpdate();
+}
+
+// ---------------------------------------------------------------------------
+// Live tree: the backend watches the folders shown (root and unfolded ones) plus
+// the git dir, and reports the ones whose content changed.
+
+let gitDir = null;
+let watchTimer = null;
+let gitRefreshTimer = null;
+
+function shownFolders() {
+  return [...fileTreeEl.querySelectorAll(".tree-children-wrapper[data-dir]")]
+    .filter((wrapper) => wrapper.isConnected)
+    .map((wrapper) => wrapper.dataset.dir);
+}
+
+function scheduleWatchUpdate() {
+  clearTimeout(watchTimer);
+  watchTimer = setTimeout(() => {
+    const dirs = shownFolders();
+    if (gitDir) dirs.push(gitDir);
+    invoke("watch_dirs", { dirs }).catch(() => {});
+  }, 100);
+}
+
+function scheduleGitRefresh() {
+  clearTimeout(gitRefreshTimer);
+  gitRefreshTimer = setTimeout(() => refreshGitBar(treeRoot), 300);
+}
+
+listen("fs-changed", async (event) => {
+  dirSizeCache.clear();
+  for (const dir of event.payload) {
+    if (dir !== gitDir) await refreshDir(dir);
+  }
+  scheduleGitRefresh();
+  if (filterInputEl.value.trim()) runSearch();
+});
+
+// Brings one shown folder up to date, keeping the nodes still there (and what is
+// unfolded below them) as they are.
+async function refreshDir(path) {
+  const wrapper = [...fileTreeEl.querySelectorAll(".tree-children-wrapper[data-dir]")].find(
+    (w) => w.dataset.dir === path,
+  );
+  if (!wrapper) return;
+  let entries;
+  try {
+    entries = await invoke("list_dir", { path });
+  } catch {
+    return;
+  }
+  const depth = Number(wrapper.dataset.depth);
+  const existing = new Map();
+  for (const child of wrapper.children) {
+    if (child.classList.contains("tree-node") && child.dataset.path) existing.set(child.dataset.path, child);
+  }
+
+  const wanted = new Set(entries.map((entry) => entry.path));
+  for (const [nodePath, node] of existing) {
+    if (wanted.has(nodePath)) continue;
+    node.unfoldedChildren?.()?.remove();
+    if (node === activeNodeEl) activeNodeEl = null;
+    node.remove();
+    existing.delete(nodePath);
+  }
+
+  // Entries come sorted: walk them, inserting the new ones after the previous node
+  // (after what is unfolded below it).
+  let previous = null;
+  for (const entry of entries) {
+    let node = existing.get(entry.path);
+    if (!node) {
+      node = await buildNode(entry, depth);
+      if (!previous) wrapper.prepend(node);
+      else (previous.unfoldedChildren?.() || previous).after(node);
+    }
+    previous = node;
+  }
+  applyGitBadges();
+  scheduleWatchUpdate();
 }
 
 // The filter searches every subfolder of the tree root (find_files) and shows a flat
