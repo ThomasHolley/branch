@@ -653,14 +653,58 @@ async fn open_in_editor(app: tauri::AppHandle, path: String) -> Result<(), Strin
     }
 }
 
+// To the Trash / Recycle Bin, so a wrong click can be undone.
 #[tauri::command]
 async fn delete_path(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
-    if p.is_dir() {
-        fs::remove_dir_all(p).map_err(|e| e.to_string())
-    } else {
-        fs::remove_file(p).map_err(|e| e.to_string())
+    trash::delete(&path).map_err(|e| e.to_string())
+}
+
+// Folders the filter doesn't descend into: huge, generated, rarely what is looked for.
+const SKIPPED_DIRS: [&str; 5] = ["node_modules", "target", "dist", "build", "vendor"];
+
+// Recursive, case-insensitive name search under `root`, breadth first so that the
+// closest matches come first. Bounded in results and in folders visited.
+fn search_files(root: &Path, query: &str, limit: usize) -> Vec<DirEntry> {
+    let query = query.to_lowercase();
+    let mut results = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    let mut budget = 20_000u32;
+    while let Some(dir) = queue.pop_front() {
+        let Ok(read) = fs::read_dir(&dir) else { continue };
+        let mut entries: Vec<fs::DirEntry> = read.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
+        for entry in entries {
+            if budget == 0 || results.len() >= limit {
+                return results;
+            }
+            budget -= 1;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_hidden(&entry, &name) {
+                continue;
+            }
+            let path = entry.path();
+            // file_type doesn't follow symlinks: no loops through a linked folder.
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if name.to_lowercase().contains(&query) {
+                results.push(DirEntry {
+                    name,
+                    path: path.to_string_lossy().to_string(),
+                    is_dir,
+                });
+            } else if is_dir && SKIPPED_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            if is_dir {
+                queue.push_back(path);
+            }
+        }
     }
+    results
+}
+
+#[tauri::command]
+async fn find_files(root: String, query: String) -> Result<Vec<DirEntry>, String> {
+    Ok(search_files(Path::new(&root), &query, 200))
 }
 
 // git prints forward slashes; on Windows the tree uses backslashes, so the keys must match.
@@ -797,6 +841,7 @@ pub fn run() {
             dir_size,
             open_in_editor,
             delete_path,
+            find_files,
             git_status
         ])
         .run(tauri::generate_context!())
@@ -862,5 +907,22 @@ mod tests {
         let output = "\nActive Connections\n\n  Proto  Local Address          Foreign Address        State           PID\n  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       900\n  TCP    127.0.0.1:5173         0.0.0.0:0              LISTENING       4242\n  TCP    [::1]:3000             [::]:0                 LISTENING       4243\n  TCP    127.0.0.1:5173         127.0.0.1:50000        ESTABLISHED     4242\n";
         let pids = [4242, 4243].into_iter().collect();
         assert_eq!(parse_netstat_ports(output, &pids), vec![3000, 5173]);
+    }
+
+    #[test]
+    fn search_is_recursive_and_skips_generated_folders() {
+        let root = std::env::temp_dir().join(format!("branch-search-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/components")).unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join("src/components/Button.js"), "").unwrap();
+        fs::write(root.join("node_modules/pkg/button.js"), "").unwrap();
+        fs::write(root.join(".git/button"), "").unwrap();
+        fs::write(root.join("button.md"), "").unwrap();
+
+        let names: Vec<String> = search_files(&root, "BUTTON", 10).into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["button.md", "Button.js"]);
+        fs::remove_dir_all(&root).unwrap();
     }
 }
