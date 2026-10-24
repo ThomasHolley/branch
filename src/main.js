@@ -5,6 +5,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { classifyForeground, formatElapsed, gitOperationLabel } from "./context.js";
 
 const term = new Terminal({
   cursorBlink: true,
@@ -30,6 +31,7 @@ term.onData((data) => {
   // bash only reports a command once it is done: Enter is enough to know one is running.
   if (atPrompt && data.includes("\r")) {
     atPrompt = false;
+    commandStartedAt = Date.now();
     setTimeout(pollLiveState, 300);
   }
   invoke("write_to_pty", { data });
@@ -48,7 +50,6 @@ listen("pty-data", (event) => {
   const matches = outputTail.match(URL_REGEX);
   if (matches) {
     lastServerUrl = matches[matches.length - 1];
-    updateServerPanel();
   }
 });
 
@@ -86,6 +87,9 @@ const gitBarEl = document.getElementById("git-bar");
 const gitBranchEl = document.getElementById("git-branch");
 const gitAheadBehindEl = document.getElementById("git-ahead-behind");
 const filterInputEl = document.getElementById("filter-input");
+const gitOperationEl = document.getElementById("git-operation");
+const gitOperationLabelEl = document.getElementById("git-operation-label");
+let gitOperation = null;
 let activeNodeEl = null;
 let currentGitEntries = {};
 const dirSizeCache = new Map();
@@ -124,13 +128,39 @@ async function refreshGitBar(path) {
     if (status.ahead) parts.push(`↑${status.ahead}`);
     if (status.behind) parts.push(`↓${status.behind}`);
     gitAheadBehindEl.textContent = parts.join(" ");
+    gitOperation = status.operation || null;
+    if (gitOperation) {
+      const conflicts = Object.values(currentGitEntries).filter((code) => code === "UU").length;
+      gitOperationLabelEl.textContent = gitOperationLabel(gitOperation, conflicts);
+    }
+    gitOperationEl.hidden = !gitOperation;
     applyGitBadges();
   } catch {
     currentGitEntries = {};
+    gitOperation = null;
     gitBarEl.hidden = true;
     gitBarEl.dataset.hasRepo = "false";
+    gitOperationEl.hidden = true;
   }
 }
+
+// Typed at the prompt for the user, like the folder navigation.
+async function runAtPrompt(line) {
+  if (integration && !atPrompt) return;
+  await invoke("run_at_prompt", { line });
+  term.focus();
+}
+
+document.getElementById("git-continue").addEventListener("click", () => {
+  if (gitOperation) runAtPrompt(`git ${gitOperation} --continue`);
+});
+
+document.getElementById("git-abort").addEventListener("click", () => {
+  if (!gitOperation) return;
+  if (window.confirm(`Annuler le ${gitOperation} en cours ? Les modifications de l'opération seront perdues.`)) {
+    runAtPrompt(`git ${gitOperation} --abort`);
+  }
+});
 
 function applyGitBadges() {
   fileTreeEl.querySelectorAll(".tree-node").forEach((node) => {
@@ -365,12 +395,19 @@ const serverPanelEl = document.getElementById("server-panel");
 const sshPanelEl = document.getElementById("ssh-panel");
 const claudeBranchEl = document.getElementById("claude-branch");
 const claudeHistoryEl = document.getElementById("claude-history");
-const serverUrlEl = document.getElementById("server-url");
+const serverUrlsEl = document.getElementById("server-urls");
 const sshHostEl = document.getElementById("ssh-host");
 const sshCwdEl = document.getElementById("ssh-cwd");
 
-const SERVER_PROCESS_NAMES = new Set(["node", "npm", "yarn", "pnpm", "vite", "next-server"]);
+const contextPanelEl = document.getElementById("context-panel");
+const contextTitleEl = document.getElementById("context-title");
+const contextDetailEl = document.getElementById("context-detail");
+const contextElapsedEl = document.getElementById("context-elapsed");
+const contextActionsEl = document.getElementById("context-actions");
 let sidebarMode = "shell";
+let contextKey = null;
+let serverUrlsKey = null;
+let commandStartedAt = null;
 
 function setSidebarMode(mode) {
   if (mode === sidebarMode) return;
@@ -380,22 +417,73 @@ function setSidebarMode(mode) {
     outputTail = "";
   }
   sidebarMode = mode;
+  contextKey = mode === "context" ? contextKey : null;
   gitBarEl.hidden = mode !== "shell" || gitBarEl.dataset.hasRepo !== "true";
+  gitOperationEl.hidden = mode !== "shell" || !gitOperation;
   fileTreeEl.hidden = mode !== "shell";
   document.querySelector(".filter-row").hidden = mode !== "shell";
   commandHistoryEl.hidden = mode !== "shell" || commandHistory.length === 0;
   claudePanelEl.hidden = mode !== "claude";
   serverPanelEl.hidden = mode !== "server";
   sshPanelEl.hidden = mode !== "ssh";
+  contextPanelEl.hidden = mode !== "context";
 }
 
-function updateServerPanel() {
-  serverUrlEl.textContent = lastServerUrl || "URL non détectée";
+function updateServerPanel(urls) {
+  // Rebuilt only when the list changes, so a click isn't lost to a re-render.
+  const key = urls.join(" ");
+  if (key === serverUrlsKey) return;
+  serverUrlsKey = key;
+  serverUrlsEl.innerHTML = "";
+  if (urls.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "server-url";
+    empty.textContent = "URL non détectée";
+    serverUrlsEl.appendChild(empty);
+    return;
+  }
+  urls.forEach((url, index) => {
+    const row = document.createElement("div");
+    row.className = index === 0 ? "server-url-row" : "server-url-row secondary";
+    const label = document.createElement("span");
+    label.className = "server-url";
+    label.textContent = url;
+    label.title = url;
+    const open = document.createElement("button");
+    open.textContent = "Ouvrir";
+    open.addEventListener("click", () => openUrl(url));
+    row.append(label, open);
+    serverUrlsEl.appendChild(row);
+  });
 }
 
-document.getElementById("server-open").addEventListener("click", () => {
-  if (lastServerUrl) openUrl(lastServerUrl);
-});
+// Editor, pager, REPL or any other running command: one panel built from the
+// description classifyForeground returns.
+function showContextPanel(context) {
+  setSidebarMode("context");
+  if (context.key !== contextKey) {
+    contextKey = context.key;
+    contextTitleEl.textContent = context.title;
+    contextDetailEl.textContent = context.detail;
+    contextDetailEl.title = context.detailTitle;
+    contextDetailEl.hidden = !context.detail;
+    contextActionsEl.innerHTML = "";
+    for (const action of context.actions) {
+      const button = document.createElement("button");
+      button.textContent = action.label;
+      button.addEventListener("click", () => {
+        invoke("write_to_pty", { data: action.keys });
+        term.focus();
+      });
+      contextActionsEl.appendChild(button);
+    }
+  }
+  contextElapsedEl.hidden = !context.elapsed;
+  if (context.elapsed) {
+    if (!commandStartedAt) commandStartedAt = Date.now();
+    contextElapsedEl.textContent = `Depuis ${formatElapsed(Date.now() - commandStartedAt)}`;
+  }
+}
 
 document.getElementById("server-stop").addEventListener("click", () => {
   invoke("write_to_pty", { data: String.fromCharCode(3) });
@@ -448,6 +536,7 @@ term.parser.registerOscHandler(7, (data) => {
 function onCommandStart(command) {
   atPrompt = false;
   pendingCommand = command;
+  commandStartedAt = Date.now();
   lastServerUrl = null;
   outputTail = "";
   // Pick up claude/ssh/a dev server quickly instead of waiting for the next tick.
@@ -458,6 +547,7 @@ async function onPrompt(code, cwd) {
   integration = true;
   atPrompt = true;
   remoteCwd = null;
+  commandStartedAt = null;
   setSidebarMode("shell");
   const finished = pendingCommand;
   pendingCommand = null;
@@ -522,16 +612,19 @@ function updateSshPanel(command) {
 async function pollLiveState() {
   if (integration && atPrompt) return;
 
-  let name = "";
+  let foreground;
   try {
-    name = await invoke("foreground_process");
+    foreground = await invoke("foreground_state");
   } catch {
     return;
   }
   // The prompt may have come back while ps was running.
   if (integration && atPrompt) return;
 
-  if (name === "claude") {
+  const context = classifyForeground(foreground, { lastServerUrl, pendingCommand });
+  if (context.mode !== "context" && context.mode !== "shell") commandStartedAt = null;
+
+  if (context.mode === "claude") {
     setSidebarMode("claude");
     try {
       const cwd = integration ? liveCwd : await invoke("shell_cwd");
@@ -540,16 +633,14 @@ async function pollLiveState() {
     } catch {
       claudeBranchEl.textContent = "";
     }
-  } else if (name === "ssh") {
+  } else if (context.mode === "ssh") {
     setSidebarMode("ssh");
-    try {
-      updateSshPanel(await invoke("foreground_command"));
-    } catch {
-      updateSshPanel("");
-    }
-  } else if (SERVER_PROCESS_NAMES.has(name)) {
+    updateSshPanel(context.command);
+  } else if (context.mode === "server") {
     setSidebarMode("server");
-    updateServerPanel();
+    updateServerPanel(context.urls);
+  } else if (context.mode === "context") {
+    showContextPanel(context);
   } else {
     setSidebarMode("shell");
     // With integration, the next prompt reports the cwd.

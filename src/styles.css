@@ -281,11 +281,21 @@ body {
   padding: 12px 10px;
 }
 
+.server-urls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
 .server-url-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 10px;
+}
+
+.server-url-row.secondary .server-url {
+  color: #888;
 }
 
 .server-url {
@@ -324,6 +334,45 @@ body {
   color: #ccc;
   margin-bottom: 10px;
   font-family: Menlo, Monaco, Consolas, "Cascadia Mono", monospace;
+}
+
+.context-panel {
+  padding: 12px 10px;
+}
+
+.context-elapsed {
+  font-size: 12px;
+  color: #999;
+  margin: -4px 0 10px;
+}
+
+.git-operation {
+  padding: 8px 10px;
+  border-bottom: 1px solid #333;
+  background: #3a2f1a;
+  font-size: 12px;
+  color: #e2c08d;
+  flex-shrink: 0;
+}
+
+.git-operation-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.git-operation-actions button {
+  background: #333;
+  border: none;
+  color: #ddd;
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.git-operation-actions button:hover {
+  background: #3e3e3e;
 }
 
 .ssh-cwd {

@@ -56,6 +56,8 @@ struct GitStatus {
     ahead: i32,
     behind: i32,
     entries: HashMap<String, String>,
+    // "merge", "rebase", "cherry-pick" or "revert" while one is waiting to be finished
+    operation: Option<String>,
 }
 
 // Builds a std Command that doesn't flash a console window on Windows.
@@ -164,18 +166,28 @@ fn shell_command() -> CommandBuilder {
     cmd
 }
 
-// Both variants first clear whatever is already typed at the prompt (Ctrl+U for
-// zsh/bash, Escape for PSReadLine) so the cd isn't appended to it.
+// A command line run at the prompt. It first clears whatever is already typed
+// (Ctrl+U for zsh/bash, Escape for PSReadLine) so it isn't appended to it.
+#[cfg(not(windows))]
+fn prompt_line(line: &str) -> String {
+    format!("\x15{}\n", line)
+}
+
+#[cfg(windows)]
+fn prompt_line(line: &str) -> String {
+    format!("\x1b{}\r", line)
+}
+
 #[cfg(not(windows))]
 fn cd_command(path: &str) -> String {
     let escaped = path.replace('\'', "'\\''");
-    format!("\x15cd '{}' && clear\n", escaped)
+    prompt_line(&format!("cd '{}' && clear", escaped))
 }
 
 #[cfg(windows)]
 fn cd_command(path: &str) -> String {
     let escaped = path.replace('\'', "''");
-    format!("\x1bSet-Location -LiteralPath '{}'; Clear-Host\r", escaped)
+    prompt_line(&format!("Set-Location -LiteralPath '{}'; Clear-Host", escaped))
 }
 
 #[cfg(not(windows))]
@@ -192,10 +204,101 @@ fn foreground_pgid(pid: u32) -> Result<Option<String>, String> {
     }
 }
 
-// Windows has no foreground process group: follow the most recent child chain from the shell.
-// Returns (name without .exe, full command line), or None when the shell itself is idle.
+// What runs in the foreground of the terminal. `ports` are the TCP ports the foreground
+// job listens on: that is how a dev server is recognised, whatever it is written in.
+#[derive(Serialize, Default)]
+struct ForegroundState {
+    name: String,
+    command: String,
+    ports: Vec<u16>,
+}
+
+fn port_of(address: &str) -> Option<u16> {
+    address.rsplit(':').next()?.parse().ok()
+}
+
+// `lsof -Fn` output: one "n<address>:<port>" line per listening socket.
+#[cfg_attr(windows, allow(dead_code))]
+fn parse_lsof_ports(output: &str) -> Vec<u16> {
+    let mut ports: Vec<u16> = output
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .filter_map(port_of)
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+// `netstat -ano` output: "  TCP    0.0.0.0:5173    0.0.0.0:0    LISTENING    1234".
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn parse_netstat_ports(output: &str, pids: &std::collections::HashSet<u32>) -> Vec<u16> {
+    let mut ports: Vec<u16> = output
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() == 5 && fields[0] == "TCP" && fields[3] == "LISTENING" {
+                let pid: u32 = fields[4].parse().ok()?;
+                if pids.contains(&pid) {
+                    return port_of(fields[1]);
+                }
+            }
+            None
+        })
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+#[cfg(not(windows))]
+fn foreground_state_of(shell_pid: u32) -> Result<ForegroundState, String> {
+    let Some(tpgid) = foreground_pgid(shell_pid)? else {
+        return Ok(ForegroundState::default());
+    };
+
+    let comm_out = command("ps")
+        .args(["-o", "comm=", "-p", &tpgid])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let comm = String::from_utf8_lossy(&comm_out.stdout).trim().to_string();
+    let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
+
+    let args_out = command("ps")
+        .args(["-o", "args=", "-p", &tpgid])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let command_line = String::from_utf8_lossy(&args_out.stdout).trim().to_string();
+
+    // The shell itself is in the foreground: nothing to look for.
+    if tpgid == shell_pid.to_string() {
+        return Ok(ForegroundState { name, command: command_line, ports: Vec::new() });
+    }
+
+    // Every process of the foreground job (npm → sh → node for `npm run dev`).
+    let pgrep_out = command("pgrep").args(["-g", &tpgid]).output().map_err(|e| e.to_string())?;
+    let pids = String::from_utf8_lossy(&pgrep_out.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(",");
+    let ports = if pids.is_empty() {
+        Vec::new()
+    } else {
+        let lsof_out = command("lsof")
+            .args(["-nP", "-a", "-iTCP", "-sTCP:LISTEN", "-p", &pids, "-Fn"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        parse_lsof_ports(&String::from_utf8_lossy(&lsof_out.stdout))
+    };
+
+    Ok(ForegroundState { name, command: command_line, ports })
+}
+
+// Windows has no foreground process group: follow the most recent child chain from the shell
+// for the name, and look at every descendant of the shell for listening ports.
 #[cfg(windows)]
-fn foreground_info(shell_pid: u32) -> Option<(String, String)> {
+fn foreground_state_of(shell_pid: u32) -> Result<ForegroundState, String> {
+    use std::collections::HashSet;
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
     let mut sys = System::new();
@@ -220,11 +323,13 @@ fn foreground_info(shell_pid: u32) -> Option<(String, String)> {
         }
     }
     if current == shell {
-        return None;
+        return Ok(ForegroundState::default());
     }
+    let Some(process) = sys.process(current) else {
+        return Ok(ForegroundState::default());
+    };
 
-    let process = sys.process(current)?;
-    let cmdline = process
+    let command_line = process
         .cmd()
         .iter()
         .map(|a| a.to_string_lossy().to_string())
@@ -233,10 +338,35 @@ fn foreground_info(shell_pid: u32) -> Option<(String, String)> {
     let raw = process.name().to_string_lossy().to_lowercase();
     let mut name = raw.strip_suffix(".exe").unwrap_or(&raw).to_string();
     // Claude Code installed through npm runs as node.exe
-    if cmdline.contains("claude-code") {
+    if command_line.contains("claude-code") {
         name = "claude".to_string();
     }
-    Some((name, cmdline))
+
+    let mut descendants: HashSet<u32> = HashSet::new();
+    let mut frontier = vec![shell];
+    while let Some(parent) = frontier.pop() {
+        for p in sys.processes().values().filter(|p| p.parent() == Some(parent)) {
+            if descendants.insert(p.pid().as_u32()) {
+                frontier.push(p.pid());
+            }
+        }
+    }
+    let ports = command("netstat")
+        .args(["-ano", "-p", "TCP"])
+        .output()
+        .map(|out| parse_netstat_ports(&String::from_utf8_lossy(&out.stdout), &descendants))
+        .unwrap_or_default();
+    // IPv6 sockets are listed separately.
+    let ports_v6 = command("netstat")
+        .args(["-ano", "-p", "TCPv6"])
+        .output()
+        .map(|out| parse_netstat_ports(&String::from_utf8_lossy(&out.stdout), &descendants))
+        .unwrap_or_default();
+    let mut ports: Vec<u16> = ports.into_iter().chain(ports_v6).collect();
+    ports.sort_unstable();
+    ports.dedup();
+
+    Ok(ForegroundState { name, command: command_line, ports })
 }
 
 #[tauri::command]
@@ -352,6 +482,11 @@ fn cd_to(path: String, state: State<PtyState>) -> Result<(), String> {
     write_to_pty(cd_command(&path), state)
 }
 
+#[tauri::command]
+fn run_at_prompt(line: String, state: State<PtyState>) -> Result<(), String> {
+    write_to_pty(prompt_line(&line), state)
+}
+
 fn is_hidden(entry: &fs::DirEntry, file_name: &str) -> bool {
     if file_name.starts_with('.') {
         return true;
@@ -399,61 +534,13 @@ async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
 }
 
 #[tauri::command]
-async fn foreground_process(state: State<'_, PtyState>) -> Result<String, String> {
+async fn foreground_state(state: State<'_, PtyState>) -> Result<ForegroundState, String> {
     let pid = state
         .shell_pid
         .lock()
         .unwrap()
         .ok_or_else(|| "shell not started".to_string())?;
-
-    #[cfg(windows)]
-    {
-        Ok(foreground_info(pid).map(|(name, _)| name).unwrap_or_default())
-    }
-
-    #[cfg(not(windows))]
-    {
-        let tpgid = match foreground_pgid(pid)? {
-            Some(v) => v,
-            None => return Ok(String::new()),
-        };
-
-        let comm_out = command("ps")
-            .args(["-o", "comm=", "-p", &tpgid])
-            .output()
-            .map_err(|e| e.to_string())?;
-        let comm = String::from_utf8_lossy(&comm_out.stdout).trim().to_string();
-        let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
-        Ok(name)
-    }
-}
-
-#[tauri::command]
-async fn foreground_command(state: State<'_, PtyState>) -> Result<String, String> {
-    let pid = state
-        .shell_pid
-        .lock()
-        .unwrap()
-        .ok_or_else(|| "shell not started".to_string())?;
-
-    #[cfg(windows)]
-    {
-        Ok(foreground_info(pid).map(|(_, cmd)| cmd).unwrap_or_default())
-    }
-
-    #[cfg(not(windows))]
-    {
-        let tpgid = match foreground_pgid(pid)? {
-            Some(v) => v,
-            None => return Ok(String::new()),
-        };
-
-        let args_out = command("ps")
-            .args(["-o", "args=", "-p", &tpgid])
-            .output()
-            .map_err(|e| e.to_string())?;
-        Ok(String::from_utf8_lossy(&args_out.stdout).trim().to_string())
-    }
+    foreground_state_of(pid)
 }
 
 #[tauri::command]
@@ -642,7 +729,22 @@ fn parse_porcelain(output: &str, base: &str, prefix: &str) -> GitStatus {
         ahead,
         behind,
         entries,
+        operation: None,
     }
+}
+
+// The marker files git leaves in the git dir while an operation is paused.
+fn git_operation(git_dir: &Path) -> Option<String> {
+    [
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("MERGE_HEAD", "merge"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+    ]
+    .iter()
+    .find(|(marker, _)| git_dir.join(marker).exists())
+    .map(|(_, name)| name.to_string())
 }
 
 #[tauri::command]
@@ -655,13 +757,19 @@ async fn git_status(path: String) -> Result<GitStatus, String> {
         return Err("not a git repository".to_string());
     }
 
-    let prefix_out = command("git")
-        .args(["-C", &path, "rev-parse", "--show-prefix"])
+    // One line each, in this order; the prefix line is empty at the repo root.
+    let rev_out = command("git")
+        .args(["-C", &path, "rev-parse", "--git-dir", "--show-prefix"])
         .output()
         .map_err(|e| e.to_string())?;
-    let prefix = String::from_utf8_lossy(&prefix_out.stdout).trim().to_string();
+    let rev = String::from_utf8_lossy(&rev_out.stdout).to_string();
+    let mut lines = rev.lines();
+    let git_dir = Path::new(&path).join(lines.next().unwrap_or(".git").trim());
+    let prefix = lines.next().unwrap_or("").trim().to_string();
 
-    Ok(parse_porcelain(&String::from_utf8_lossy(&out.stdout), &path, &prefix))
+    let mut status = parse_porcelain(&String::from_utf8_lossy(&out.stdout), &path, &prefix);
+    status.operation = git_operation(&git_dir);
+    Ok(status)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -680,11 +788,11 @@ pub fn run() {
             write_to_pty,
             resize_pty,
             cd_to,
+            run_at_prompt,
             list_dir,
             home_dir,
             parent_dir,
-            foreground_process,
-            foreground_command,
+            foreground_state,
             shell_cwd,
             dir_size,
             open_in_editor,
@@ -741,5 +849,18 @@ mod tests {
         assert_eq!(status.entries.get(&key("neuf dossier/a.txt")).map(String::as_str), Some("??"));
         // outside the requested folder, and the rename's original path is not an entry
         assert_eq!(status.entries.len(), 4);
+    }
+
+    #[test]
+    fn lsof_ports() {
+        let output = "p123\nf10\nn*:5173\nf11\nn[::1]:5173\np124\nf3\nn127.0.0.1:24678\n";
+        assert_eq!(parse_lsof_ports(output), vec![5173, 24678]);
+    }
+
+    #[test]
+    fn netstat_ports() {
+        let output = "\nActive Connections\n\n  Proto  Local Address          Foreign Address        State           PID\n  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       900\n  TCP    127.0.0.1:5173         0.0.0.0:0              LISTENING       4242\n  TCP    [::1]:3000             [::]:0                 LISTENING       4243\n  TCP    127.0.0.1:5173         127.0.0.1:50000        ESTABLISHED     4242\n";
+        let pids = [4242, 4243].into_iter().collect();
+        assert_eq!(parse_netstat_ports(output, &pids), vec![3000, 5173]);
     }
 }
