@@ -93,6 +93,8 @@ struct GitStatus {
     entries: HashMap<String, String>,
     // "merge", "rebase", "cherry-pick" or "revert" while one is waiting to be finished
     operation: Option<String>,
+    // watched by the front end, so that a commit made elsewhere updates the badges
+    git_dir: Option<String>,
 }
 
 // Builds a std Command that doesn't flash a console window on Windows.
@@ -607,6 +609,97 @@ fn start_shell(
     Ok(id)
 }
 
+// Watches the folders the tree shows (each one alone, not recursively) and emits
+// "fs-changed" with the folders whose content changed, grouped over a short delay.
+#[derive(Default)]
+struct DirWatcher {
+    watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    // canonical path → path as the front end gave it (FSEvents reports canonical
+    // paths: /private/tmp for /tmp)
+    watched: Arc<Mutex<HashMap<std::path::PathBuf, String>>>,
+}
+
+// `on_change` receives the changed folders, spelled as in `watched`; it returns false
+// to stop.
+fn start_dir_watcher(
+    watched: Arc<Mutex<HashMap<std::path::PathBuf, String>>>,
+    on_change: impl Fn(Vec<String>) -> bool + Send + 'static,
+) -> Result<notify::RecommendedWatcher, String> {
+    use notify::EventKind;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel::<std::path::PathBuf>();
+    let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        let Ok(event) = result else { return };
+        if matches!(event.kind, EventKind::Access(_)) {
+            return;
+        }
+        for path in event.paths {
+            if let Some(parent) = path.parent() {
+                let _ = tx.send(parent.to_path_buf());
+            }
+        }
+    })
+    .map_err(|e| e.to_string())?;
+
+    std::thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut changed = std::collections::HashSet::from([first]);
+            // A command touching many files makes one refresh, not hundreds.
+            while let Ok(more) = rx.recv_timeout(Duration::from_millis(250)) {
+                changed.insert(more);
+            }
+            let dirs: Vec<String> = {
+                let watched = watched.lock().unwrap();
+                changed
+                    .iter()
+                    .filter_map(|dir| {
+                        let canonical = fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+                        watched.get(&canonical).cloned()
+                    })
+                    .collect()
+            };
+            if !dirs.is_empty() && !on_change(dirs) {
+                break;
+            }
+        }
+    });
+    Ok(watcher)
+}
+
+// Replaces the set of watched folders with `dirs`.
+#[tauri::command]
+fn watch_dirs(app: tauri::AppHandle, state: State<DirWatcher>, dirs: Vec<String>) -> Result<(), String> {
+    use notify::{RecursiveMode, Watcher};
+
+    let mut guard = state.watcher.lock().unwrap();
+    if guard.is_none() {
+        let on_change = move |dirs: Vec<String>| app.emit("fs-changed", dirs).is_ok();
+        *guard = Some(start_dir_watcher(state.watched.clone(), on_change)?);
+    }
+    let watcher = guard.as_mut().unwrap();
+    let wanted: HashMap<std::path::PathBuf, String> = dirs
+        .into_iter()
+        .filter_map(|dir| fs::canonicalize(&dir).ok().map(|canonical| (canonical, dir)))
+        .collect();
+
+    let mut watched = state.watched.lock().unwrap();
+    watched.retain(|canonical, _| {
+        let keep = wanted.contains_key(canonical);
+        if !keep {
+            let _ = watcher.unwatch(canonical);
+        }
+        keep
+    });
+    for (canonical, original) in wanted {
+        if !watched.contains_key(&canonical) && watcher.watch(&canonical, RecursiveMode::NonRecursive).is_ok() {
+            watched.insert(canonical, original);
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn close_shell(id: u32, state: State<Sessions>) -> Result<(), String> {
     if let Some(session) = state.map.lock().unwrap().remove(&id) {
@@ -1030,6 +1123,7 @@ fn parse_porcelain(output: &str, base: &str, prefix: &str) -> GitStatus {
         behind,
         entries,
         operation: None,
+        git_dir: None,
     }
 }
 
@@ -1069,6 +1163,7 @@ async fn git_status(path: String) -> Result<GitStatus, String> {
 
     let mut status = parse_porcelain(&String::from_utf8_lossy(&out.stdout), &path, &prefix);
     status.operation = git_operation(&git_dir);
+    status.git_dir = Some(git_dir.to_string_lossy().to_string());
     Ok(status)
 }
 
@@ -1130,6 +1225,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Sessions::default())
+        .manage(DirWatcher::default())
         .invoke_handler(tauri::generate_handler![
             start_shell,
             shell_choices,
@@ -1149,6 +1245,7 @@ pub fn run() {
             open_in_editor,
             delete_path,
             find_files,
+            watch_dirs,
             git_status
         ])
         .run(tauri::generate_context!())
@@ -1251,6 +1348,31 @@ mod tests {
         );
         assert_eq!(find_mac_app("Absent.app", Some(&home)), None);
         fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn watcher_reports_the_folder_as_given() {
+        use notify::{RecursiveMode, Watcher};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // temp_dir is under /var on macOS, a symlink to /private/var: FSEvents reports
+        // the canonical path, the callback must get the spelling it was given.
+        let dir = std::env::temp_dir().join(format!("branch-watch-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let given = dir.to_string_lossy().to_string();
+        let canonical = fs::canonicalize(&dir).unwrap();
+        let watched = Arc::new(Mutex::new(HashMap::from([(canonical.clone(), given.clone())])));
+
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = start_dir_watcher(watched, move |dirs| tx.send(dirs).is_ok()).unwrap();
+        watcher.watch(&canonical, RecursiveMode::NonRecursive).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        fs::write(dir.join("nouveau.txt"), "x").unwrap();
+
+        let dirs = rx.recv_timeout(Duration::from_secs(5)).expect("aucun événement");
+        assert_eq!(dirs, vec![given]);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
