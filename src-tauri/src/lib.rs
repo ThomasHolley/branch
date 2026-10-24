@@ -4,14 +4,49 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 
-struct PtyState {
-    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
-    writer: Mutex<Option<Box<dyn Write + Send>>>,
-    shell_pid: Mutex<Option<u32>>,
-    killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
+// One shell per terminal tab, keyed by the id start_shell returns.
+struct Session {
+    master: Mutex<Box<dyn MasterPty + Send>>,
+    writer: Mutex<Box<dyn Write + Send>>,
+    pid: Option<u32>,
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+}
+
+#[derive(Default)]
+struct Sessions {
+    map: Mutex<HashMap<u32, Arc<Session>>>,
+    next_id: AtomicU32,
+}
+
+impl Sessions {
+    fn get(&self, id: u32) -> Result<Arc<Session>, String> {
+        self.map
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| "shell not started".to_string())
+    }
+
+    fn pid(&self, id: u32) -> Result<u32, String> {
+        self.get(id)?.pid.ok_or_else(|| "shell pid unknown".to_string())
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct PtyData {
+    id: u32,
+    data: String,
+}
+
+#[derive(Clone, Serialize)]
+struct PtyExit {
+    id: u32,
+    code: u32,
 }
 
 // Decodes as much of `pending` as possible, keeping a multi-byte character
@@ -86,8 +121,8 @@ fn home_path() -> Option<std::ffi::OsString> {
 
 // On Windows there is no lsof: the PowerShell prompt writes its cwd to this file instead.
 #[cfg(windows)]
-fn cwd_file() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("branch-cwd-{}.txt", std::process::id()))
+fn cwd_file(id: u32) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("branch-cwd-{}-{}.txt", std::process::id(), id))
 }
 
 // Shell integration: each prompt reports its exit code and cwd, and each command its
@@ -162,7 +197,6 @@ fn shell_command() -> CommandBuilder {
 fn shell_command() -> CommandBuilder {
     let mut cmd = CommandBuilder::new("powershell.exe");
     cmd.args(["-NoLogo", "-NoExit", "-Command", PS_INIT]);
-    cmd.env("BRANCH_CWD_FILE", cwd_file());
     cmd
 }
 
@@ -369,8 +403,13 @@ fn foreground_state_of(shell_pid: u32) -> Result<ForegroundState, String> {
     Ok(ForegroundState { name, command: command_line, ports })
 }
 
+// Starts a new shell in `cwd` (the home folder if missing or gone) and returns its id.
 #[tauri::command]
-fn start_shell(app: tauri::AppHandle, state: State<PtyState>) -> Result<(), String> {
+fn start_shell(
+    app: tauri::AppHandle,
+    state: State<Sessions>,
+    cwd: Option<String>,
+) -> Result<u32, String> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -381,25 +420,22 @@ fn start_shell(app: tauri::AppHandle, state: State<PtyState>) -> Result<(), Stri
         })
         .map_err(|e| e.to_string())?;
 
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let mut cmd = shell_command();
-    if let Some(home) = home_path() {
-        cmd.cwd(home);
-    }
-
-    // A reload of the webview calls start_shell again: don't leave the old shell running.
-    // Clearing the pid first stops the old shell's wait thread from reporting an exit.
-    *state.shell_pid.lock().unwrap() = None;
-    if let Some(mut killer) = state.killer.lock().unwrap().take() {
-        let _ = killer.kill();
+    #[cfg(windows)]
+    cmd.env("BRANCH_CWD_FILE", cwd_file(id));
+    let start_dir = cwd
+        .filter(|dir| Path::new(dir).is_dir())
+        .map(std::ffi::OsString::from)
+        .or_else(home_path);
+    if let Some(dir) = start_dir {
+        cmd.cwd(dir);
     }
 
     let mut child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| e.to_string())?;
-    let pid = child.process_id();
-    *state.shell_pid.lock().unwrap() = pid;
-    *state.killer.lock().unwrap() = Some(child.clone_killer());
 
     let mut reader = pair
         .master
@@ -407,8 +443,13 @@ fn start_shell(app: tauri::AppHandle, state: State<PtyState>) -> Result<(), Stri
         .map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
-    *state.writer.lock().unwrap() = Some(writer);
-    *state.master.lock().unwrap() = Some(pair.master);
+    let session = Session {
+        master: Mutex::new(pair.master),
+        writer: Mutex::new(writer),
+        pid: child.process_id(),
+        killer: Mutex::new(child.clone_killer()),
+    };
+    state.map.lock().unwrap().insert(id, Arc::new(session));
 
     let reader_app = app.clone();
     std::thread::spawn(move || {
@@ -419,8 +460,8 @@ fn start_shell(app: tauri::AppHandle, state: State<PtyState>) -> Result<(), Stri
                 Ok(0) => break,
                 Ok(n) => {
                     pending.extend_from_slice(&buf[..n]);
-                    let chunk = take_utf8(&mut pending);
-                    if !chunk.is_empty() && reader_app.emit("pty-data", chunk).is_err() {
+                    let data = take_utf8(&mut pending);
+                    if !data.is_empty() && reader_app.emit("pty-data", PtyData { id, data }).is_err() {
                         break;
                     }
                 }
@@ -433,58 +474,63 @@ fn start_shell(app: tauri::AppHandle, state: State<PtyState>) -> Result<(), Stri
     // so wait on the child itself and tell the front end.
     std::thread::spawn(move || {
         let code = child.wait().map(|s| s.exit_code()).unwrap_or(1);
-        let state = app.state::<PtyState>();
-        // Only clean up if no newer shell has replaced this one in the meantime.
-        let mut shell_pid = state.shell_pid.lock().unwrap();
-        if *shell_pid == pid {
-            *shell_pid = None;
-            *state.writer.lock().unwrap() = None;
-            *state.master.lock().unwrap() = None;
-            *state.killer.lock().unwrap() = None;
-            let _ = app.emit("pty-exit", code);
+        // Already gone if the tab was closed: nobody to tell.
+        let removed = app.state::<Sessions>().map.lock().unwrap().remove(&id);
+        if removed.is_some() {
+            let _ = app.emit("pty-exit", PtyExit { id, code });
         }
     });
 
+    Ok(id)
+}
+
+#[tauri::command]
+fn close_shell(id: u32, state: State<Sessions>) -> Result<(), String> {
+    if let Some(session) = state.map.lock().unwrap().remove(&id) {
+        let _ = session.killer.lock().unwrap().kill();
+    }
+    Ok(())
+}
+
+// A reload of the webview starts over: the shells of the previous page must not linger.
+#[tauri::command]
+fn close_all_shells(state: State<Sessions>) -> Result<(), String> {
+    for (_, session) in state.map.lock().unwrap().drain() {
+        let _ = session.killer.lock().unwrap().kill();
+    }
     Ok(())
 }
 
 #[tauri::command]
-fn write_to_pty(data: String, state: State<PtyState>) -> Result<(), String> {
-    let mut guard = state.writer.lock().unwrap();
-    if let Some(writer) = guard.as_mut() {
-        writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-        writer.flush().map_err(|e| e.to_string())?;
-        Ok(())
-    } else {
-        Err("shell not started".into())
-    }
+fn write_to_pty(id: u32, data: String, state: State<Sessions>) -> Result<(), String> {
+    let session = state.get(id)?;
+    let mut writer = session.writer.lock().unwrap();
+    writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn resize_pty(cols: u16, rows: u16, state: State<PtyState>) -> Result<(), String> {
-    let guard = state.master.lock().unwrap();
-    if let Some(master) = guard.as_ref() {
-        master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())
-    } else {
-        Err("shell not started".into())
-    }
+fn resize_pty(id: u32, cols: u16, rows: u16, state: State<Sessions>) -> Result<(), String> {
+    let session = state.get(id)?;
+    let master = session.master.lock().unwrap();
+    master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn cd_to(path: String, state: State<PtyState>) -> Result<(), String> {
-    write_to_pty(cd_command(&path), state)
+fn cd_to(id: u32, path: String, state: State<Sessions>) -> Result<(), String> {
+    write_to_pty(id, cd_command(&path), state)
 }
 
 #[tauri::command]
-fn run_at_prompt(line: String, state: State<PtyState>) -> Result<(), String> {
-    write_to_pty(prompt_line(&line), state)
+fn run_at_prompt(id: u32, line: String, state: State<Sessions>) -> Result<(), String> {
+    write_to_pty(id, prompt_line(&line), state)
 }
 
 fn is_hidden(entry: &fs::DirEntry, file_name: &str) -> bool {
@@ -534,27 +580,16 @@ async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
 }
 
 #[tauri::command]
-async fn foreground_state(state: State<'_, PtyState>) -> Result<ForegroundState, String> {
-    let pid = state
-        .shell_pid
-        .lock()
-        .unwrap()
-        .ok_or_else(|| "shell not started".to_string())?;
-    foreground_state_of(pid)
+async fn foreground_state(id: u32, state: State<'_, Sessions>) -> Result<ForegroundState, String> {
+    foreground_state_of(state.pid(id)?)
 }
 
 #[tauri::command]
-async fn shell_cwd(state: State<'_, PtyState>) -> Result<String, String> {
-    let pid = state
-        .shell_pid
-        .lock()
-        .unwrap()
-        .ok_or_else(|| "shell not started".to_string())?;
-
+async fn shell_cwd(id: u32, state: State<'_, Sessions>) -> Result<String, String> {
     #[cfg(windows)]
     {
-        let _ = pid;
-        let cwd = fs::read_to_string(cwd_file()).map_err(|_| "cwd not found".to_string())?;
+        state.get(id)?;
+        let cwd = fs::read_to_string(cwd_file(id)).map_err(|_| "cwd not found".to_string())?;
         let cwd = cwd.trim();
         if cwd.is_empty() {
             Err("cwd not found".to_string())
@@ -565,6 +600,7 @@ async fn shell_cwd(state: State<'_, PtyState>) -> Result<String, String> {
 
     #[cfg(not(windows))]
     {
+        let pid = state.pid(id)?;
         let out = command("lsof")
             .args(["-a", "-d", "cwd", "-p", &pid.to_string(), "-Fn"])
             .output()
@@ -821,14 +857,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(PtyState {
-            master: Mutex::new(None),
-            writer: Mutex::new(None),
-            shell_pid: Mutex::new(None),
-            killer: Mutex::new(None),
-        })
+        .manage(Sessions::default())
         .invoke_handler(tauri::generate_handler![
             start_shell,
+            close_shell,
+            close_all_shells,
             write_to_pty,
             resize_pty,
             cd_to,

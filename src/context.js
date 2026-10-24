@@ -71,6 +71,7 @@ export function classifyForeground(foreground, { lastServerUrl = null, pendingCo
       mode: "context",
       key: `editor:${name}:${file || ""}`,
       title: `Éditeur · ${name}`,
+      tab: `✎ ${file ? basename(file) : name}`,
       detail: file ? basename(file) : "Nouveau fichier",
       detailTitle: file || "",
       actions: [
@@ -86,6 +87,7 @@ export function classifyForeground(foreground, { lastServerUrl = null, pendingCo
       mode: "context",
       key: `pager:${name}:${topic}`,
       title: name === "man" ? "Manuel" : `Lecture · ${name}`,
+      tab: name === "man" && topic ? `man ${topic}` : name,
       detail: topic ? basename(topic) : "",
       detailTitle: topic,
       actions: [
@@ -103,6 +105,7 @@ export function classifyForeground(foreground, { lastServerUrl = null, pendingCo
       mode: "context",
       key: `repl:${name}`,
       title: `REPL ${repl.label}`,
+      tab: repl.label,
       detail: "",
       detailTitle: "",
       actions: [
@@ -117,6 +120,7 @@ export function classifyForeground(foreground, { lastServerUrl = null, pendingCo
     mode: "context",
     key: `running:${text}`,
     title: "Commande en cours",
+    tab: `▶ ${basename(text.split(/\s+/)[0] || name)}`,
     detail: text,
     detailTitle: text,
     elapsed: true,
@@ -143,4 +147,25 @@ export function formatElapsed(ms) {
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes} min ${String(seconds % 60).padStart(2, "0")} s`;
   return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+}
+
+// Short label of a terminal tab, from what runs in it.
+export function tabTitle(context, cwd, exited) {
+  if (exited) return "Terminé";
+  switch (context.mode) {
+    case "claude":
+      return "✳ Claude";
+    case "ssh": {
+      const host = (context.command || "").match(/\S+@\S+/)?.[0];
+      return `⇄ ${host || "ssh"}`;
+    }
+    case "server": {
+      const port = context.urls?.[0]?.match(/:(\d+)/)?.[1];
+      return port ? `● :${port}` : "● serveur";
+    }
+    case "context":
+      return context.tab || context.title;
+    default:
+      return cwd ? basename(cwd) || cwd : "Terminal";
+  }
 }
