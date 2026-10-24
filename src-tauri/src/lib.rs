@@ -760,9 +760,25 @@ async fn open_in_editor(app: tauri::AppHandle, path: String) -> Result<(), Strin
     }
 }
 
+// Refuses what no click in the tree should ever delete: a filesystem root, the home
+// folder or one of its ancestors, or a relative path.
+fn check_deletable(path: &Path, home: Option<&Path>) -> Result<(), String> {
+    if !path.is_absolute() || path.parent().is_none() {
+        return Err("chemin refusé".to_string());
+    }
+    if let Some(home) = home {
+        if home.starts_with(path) {
+            return Err("le dossier personnel et ses parents ne peuvent pas être supprimés".to_string());
+        }
+    }
+    Ok(())
+}
+
 // To the Trash / Recycle Bin, so a wrong click can be undone.
 #[tauri::command]
 async fn delete_path(path: String) -> Result<(), String> {
+    let home = home_path().map(std::path::PathBuf::from);
+    check_deletable(Path::new(&path), home.as_deref())?;
     trash::delete(&path).map_err(|e| e.to_string())
 }
 
@@ -1008,6 +1024,17 @@ mod tests {
         assert_eq!(utf8_lang(Some("C"), Some("de_DE@rg=frzzzz")).as_deref(), Some("de_DE.UTF-8"));
         assert_eq!(utf8_lang(None, Some("fr")).as_deref(), Some("en_US.UTF-8"));
         assert_eq!(utf8_lang(None, None).as_deref(), Some("en_US.UTF-8"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn deletion_guard() {
+        let home = Path::new("/Users/me");
+        assert!(check_deletable(Path::new("/Users/me/projet/a.txt"), Some(home)).is_ok());
+        assert!(check_deletable(Path::new("/"), Some(home)).is_err());
+        assert!(check_deletable(Path::new("/Users"), Some(home)).is_err());
+        assert!(check_deletable(Path::new("/Users/me"), Some(home)).is_err());
+        assert!(check_deletable(Path::new("projet"), Some(home)).is_err());
     }
 
     #[test]
